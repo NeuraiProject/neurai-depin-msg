@@ -1,0 +1,36 @@
+{
+  "name": "@neuraiproject/neurai-depin-msg",
+  "version": "1.0.0",
+  "description": "Build and serialize DePIN encrypted messages for Neurai blockchain",
+  "main": "dist/neurai-depin-msg.min.js",
+  "browser": "dist/neurai-depin-msg.min.js",
+  "scripts": {
+    "build": "esbuild src/index.js --bundle --minify --format=iife --global-name=neuraiDepinMsg --outfile=dist/neurai-depin-msg.min.js",
+    "build:dev": "esbuild src/index.js --bundle --format=iife --global-name=neuraiDepinMsg --outfile=dist/neurai-depin-msg.js",
+    "test": "echo \"Open demo.html in a browser to test\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/neuraiproject/neurai-depin-msg.git"
+  },
+  "keywords": [
+    "Neurai",
+    "XNA",
+    "DePIN",
+    "ECIES",
+    "encryption",
+    "messaging"
+  ],
+  "author": "Neuraiproject",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/neuraiproject/neurai-depin-msg/issues"
+  },
+  "homepage": "https://github.com/neuraiproject/neurai-depin-msg#readme",
+  "dependencies": {
+    "@bitcoinerlab/secp256k1": "1.2.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.0"
+  }
+}

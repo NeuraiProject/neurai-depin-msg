@@ -4223,6 +4223,7 @@ var neuraiDepinMsg = (() => {
     base58Decode: () => base58Decode,
     buildDepinMessage: () => buildDepinMessage,
     bytesToHex: () => bytesToHex,
+    decryptDepinReceiveEncryptedPayload: () => decryptDepinReceiveEncryptedPayload,
     doubleSha256: () => doubleSha256,
     hash160: () => hash160,
     hexToBytes: () => hexToBytes,
@@ -4309,6 +4310,93 @@ var neuraiDepinMsg = (() => {
   }
   function bytesToHex(bytes) {
     return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  function normalizeHex(hex) {
+    if (typeof hex !== "string")
+      return null;
+    const trimmed = hex.trim().toLowerCase();
+    const noPrefix = trimmed.startsWith("0x") ? trimmed.slice(2) : trimmed;
+    if (noPrefix.length === 0)
+      return null;
+    if (!/^[0-9a-f]+$/.test(noPrefix))
+      return null;
+    if (noPrefix.length % 2 !== 0)
+      return null;
+    return noPrefix;
+  }
+  function timingSafeEqual(a, b) {
+    if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array))
+      return false;
+    if (a.length !== b.length)
+      return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++)
+      diff |= a[i] ^ b[i];
+    return diff === 0;
+  }
+  function readCompactSize(buf, offset) {
+    if (offset >= buf.length)
+      throw new Error("CompactSize: out of bounds");
+    const first = buf[offset];
+    if (first < 253)
+      return { value: first, offset: offset + 1 };
+    if (first === 253) {
+      if (offset + 3 > buf.length)
+        throw new Error("CompactSize: truncated uint16");
+      const value2 = buf[offset + 1] | buf[offset + 2] << 8;
+      return { value: value2, offset: offset + 3 };
+    }
+    if (first === 254) {
+      if (offset + 5 > buf.length)
+        throw new Error("CompactSize: truncated uint32");
+      const value2 = buf[offset + 1] | buf[offset + 2] << 8 | buf[offset + 3] << 16 | buf[offset + 4] << 24;
+      return { value: value2 >>> 0, offset: offset + 5 };
+    }
+    if (offset + 9 > buf.length)
+      throw new Error("CompactSize: truncated uint64");
+    let value = 0n;
+    for (let i = 0; i < 8; i++) {
+      value |= BigInt(buf[offset + 1 + i]) << 8n * BigInt(i);
+    }
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error("CompactSize: value too large");
+    }
+    return { value: Number(value), offset: offset + 9 };
+  }
+  function readVector(buf, offset) {
+    const { value: len, offset: afterLen } = readCompactSize(buf, offset);
+    if (afterLen + len > buf.length)
+      throw new Error("Vector: truncated");
+    const data = buf.slice(afterLen, afterLen + len);
+    return { data, offset: afterLen + len };
+  }
+  function deserializeEciesMessage(serialized) {
+    if (!(serialized instanceof Uint8Array))
+      throw new Error("deserializeEciesMessage: invalid input");
+    let offset = 0;
+    const ephem = readVector(serialized, offset);
+    const ephemeralPubKey = ephem.data;
+    offset = ephem.offset;
+    if (ephemeralPubKey.length !== 33 && ephemeralPubKey.length !== 65) {
+      throw new Error("Invalid ephemeral pubkey length: " + ephemeralPubKey.length);
+    }
+    const payloadVec = readVector(serialized, offset);
+    const encryptedPayload = payloadVec.data;
+    offset = payloadVec.offset;
+    const countRes = readCompactSize(serialized, offset);
+    const count = countRes.value;
+    offset = countRes.offset;
+    const recipientKeys = /* @__PURE__ */ new Map();
+    for (let i = 0; i < count; i++) {
+      if (offset + 20 > serialized.length)
+        throw new Error("recipientKeys: truncated keyid");
+      const keyId = serialized.slice(offset, offset + 20);
+      offset += 20;
+      const v = readVector(serialized, offset);
+      offset = v.offset;
+      recipientKeys.set(bytesToHex(keyId), v.data);
+    }
+    return { ephemeralPubKey, encryptedPayload, recipientKeys };
   }
   function encodeDER(signature) {
     if (signature.length !== 64) {
@@ -4514,6 +4602,21 @@ var neuraiDepinMsg = (() => {
     );
     return new Uint8Array(ciphertext);
   }
+  async function aes256CbcDecrypt(ciphertext, key, iv) {
+    const cryptoKey = await crypto.subtle.importKey(
+      "raw",
+      key,
+      { name: "AES-CBC" },
+      false,
+      ["decrypt"]
+    );
+    const plaintext = await crypto.subtle.decrypt(
+      { name: "AES-CBC", iv },
+      cryptoKey,
+      ciphertext
+    );
+    return new Uint8Array(plaintext);
+  }
   async function hmacSha256(key, data) {
     const cryptoKey = await crypto.subtle.importKey(
       "raw",
@@ -4524,6 +4627,79 @@ var neuraiDepinMsg = (() => {
     );
     const mac = await crypto.subtle.sign("HMAC", cryptoKey, data);
     return new Uint8Array(mac);
+  }
+  async function normalizePrivateKeyTo32Bytes(wifOrHex) {
+    if (typeof wifOrHex !== "string" || wifOrHex.length === 0) {
+      throw new Error("Private key is required");
+    }
+    if (isWIF(wifOrHex)) {
+      const hex = await wifToHex(wifOrHex);
+      return hexToBytes(hex);
+    }
+    const norm = normalizeHex(wifOrHex);
+    if (!norm)
+      throw new Error("Private key must be WIF or 64-hex");
+    if (norm.length !== 64)
+      throw new Error("Private key must be 32 bytes (64 hex chars)");
+    return hexToBytes(norm);
+  }
+  async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipientPrivateKey) {
+    if (!globalThis.crypto?.subtle) {
+      throw new Error("WebCrypto (crypto.subtle) is required for decrypt");
+    }
+    const normalized = normalizeHex(encryptedPayloadHex);
+    if (!normalized)
+      throw new Error("Invalid encryptedPayloadHex");
+    const serialized = hexToBytes(normalized);
+    const msg = deserializeEciesMessage(serialized);
+    const recipientPrivKeyBytes = await normalizePrivateKeyTo32Bytes(recipientPrivateKey);
+    const recipientPubKeyCompressed = secp256k1.pointFromScalar(recipientPrivKeyBytes, true);
+    if (!(recipientPubKeyCompressed instanceof Uint8Array) || recipientPubKeyCompressed.length !== 33) {
+      throw new Error("Failed to derive recipient public key");
+    }
+    const keyIdBytes = await hash160(recipientPubKeyCompressed);
+    const keyIdHex = bytesToHex(keyIdBytes);
+    const keyIdHexReversed = bytesToHex(keyIdBytes.slice().reverse());
+    const recipientPackage = msg.recipientKeys.get(keyIdHex) ?? msg.recipientKeys.get(keyIdHexReversed);
+    if (!recipientPackage)
+      return null;
+    if (recipientPackage.length < 16 + 32 + 32)
+      return null;
+    const recipientIV = recipientPackage.slice(0, 16);
+    const encryptedAESKey = recipientPackage.slice(16, recipientPackage.length - 32);
+    const recipientHmac = recipientPackage.slice(recipientPackage.length - 32);
+    const sharedPointCompressed = secp256k1.pointMultiply(msg.ephemeralPubKey, recipientPrivKeyBytes, true);
+    const sharedSecret = await sha256(sharedPointCompressed);
+    const encKey = await kdfSha256(sharedSecret, 32);
+    const expectedRecipientHmac = await hmacSha256(encKey, encryptedAESKey);
+    if (!timingSafeEqual(expectedRecipientHmac, recipientHmac))
+      return null;
+    let aesKeyRaw;
+    try {
+      aesKeyRaw = await aes256CbcDecrypt(encryptedAESKey, encKey, recipientIV);
+    } catch {
+      return null;
+    }
+    if (aesKeyRaw.length < 32)
+      return null;
+    const aesKey = aesKeyRaw.slice(0, 32);
+    const payload = msg.encryptedPayload;
+    if (payload.length < 16 + 1 + 32)
+      return null;
+    const iv = payload.slice(0, 16);
+    const ciphertext = payload.slice(16, payload.length - 32);
+    const payloadHmac = payload.slice(payload.length - 32);
+    const expectedPayloadHmac = await hmacSha256(aesKey, ciphertext);
+    if (!timingSafeEqual(expectedPayloadHmac, payloadHmac))
+      return null;
+    let plaintextBytes;
+    try {
+      plaintextBytes = await aes256CbcDecrypt(ciphertext, aesKey, iv);
+    } catch {
+      return null;
+    }
+    const decoder = new TextDecoder();
+    return decoder.decode(plaintextBytes);
   }
   async function eciesEncrypt(plaintext, recipientPubKeys) {
     const ephemeralPrivKey = randomBytes(32);
@@ -4670,6 +4846,7 @@ var neuraiDepinMsg = (() => {
   if (typeof globalThis !== "undefined") {
     globalThis.neuraiDepinMsg = {
       buildDepinMessage,
+      decryptDepinReceiveEncryptedPayload,
       wifToHex,
       isWIF,
       utils: {

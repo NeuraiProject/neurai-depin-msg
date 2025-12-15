@@ -105,6 +105,15 @@ Builds a complete serialized `CDepinMessage` (as hex) suitable for `depinsubmitm
 | `message` | `string` | yes | Plaintext message (UTF-8) |
 | `recipientPubKeys` | `string[]` | yes | Recipient compressed pubkeys as hex (66 chars each). The sender pubkey is automatically added if missing so you can decrypt your own messages. |
 
+### `neuraiDepinMsg.decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipientPrivateKey)`
+
+Decrypts the `encrypted_payload_hex` returned by Neurai Core RPC `depinreceivemsg`.
+
+- `encryptedPayloadHex`: hex string for the serialized `CECIESEncryptedMessage`.
+- `recipientPrivateKey`: recipient private key as WIF or 64-hex.
+
+Returns `string | null` (it returns `null` if the message is not for that key or authentication fails).
+
 Notes:
 - Public keys must be **compressed** (start with `02` or `03`).
 - This library does not discover recipients for a token; it only encrypts for the pubkeys you provide.

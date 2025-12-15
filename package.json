@@ -1,6 +1,6 @@
 {
   "name": "@neuraiproject/neurai-depin-msg",
-  "version": "1.0.1",
+  "version": "2.0.0",
   "description": "Build and serialize DePIN encrypted messages for Neurai blockchain",
   "main": "dist/neurai-depin-msg.min.js",
   "browser": "dist/neurai-depin-msg.min.js",

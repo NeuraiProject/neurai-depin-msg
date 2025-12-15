@@ -130,18 +130,18 @@ Notes:
 
 ## How it works (Core-compatible)
 
-### Encryption (Hybrid ECIES)
+### Encryption (Hybrid ECIES with AES-256-GCM)
 
-This matches Neurai Core's `CECIESEncryptedMessage` format:
+This matches Neurai Core's `CECIESEncryptedMessage` format (v2.0+):
 
 - Ephemeral keypair is generated per message.
 - Message encryption:
-  - AES-256-CBC encrypts plaintext with a derived AES key.
-  - Payload is stored as `[IV(16) || ciphertext || HMAC-SHA256(aesKey, ciphertext)]`.
+  - AES-256-GCM encrypts plaintext with a derived AES key (no padding).
+  - Payload is stored as `[Nonce(12) || ciphertext || AuthTag(16)]`.
 - Per-recipient key wrapping:
   - ECDH derives a shared secret from ephemeral privkey + recipient pubkey.
-  - A per-recipient `encKey` is derived and used to AES-CBC encrypt the 32-byte AES key.
-  - Recipient package is `[recipientIV(16) || encryptedAESKey || HMAC-SHA256(encKey, encryptedAESKey)]`.
+  - A per-recipient `encKey` is derived and used to AES-256-GCM encrypt the 32-byte AES key.
+  - Recipient package is `[Nonce(12) || encryptedAESKey(32) || AuthTag(16)]` (60 bytes).
 
 ### Serialization
 

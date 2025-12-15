@@ -4324,16 +4324,6 @@ var neuraiDepinMsg = (() => {
       return null;
     return noPrefix;
   }
-  function timingSafeEqual(a, b) {
-    if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array))
-      return false;
-    if (a.length !== b.length)
-      return false;
-    let diff = 0;
-    for (let i = 0; i < a.length; i++)
-      diff |= a[i] ^ b[i];
-    return diff === 0;
-  }
   function readCompactSize(buf, offset) {
     if (offset >= buf.length)
       throw new Error("CompactSize: out of bounds");
@@ -4587,46 +4577,49 @@ var neuraiDepinMsg = (() => {
     crypto.getRandomValues(bytes);
     return bytes;
   }
-  async function aes256CbcEncrypt(plaintext, key, iv) {
+  async function aes256GcmEncrypt(plaintext, key, nonce) {
+    if (key.length !== 32)
+      throw new Error("Key must be 32 bytes");
+    if (nonce.length !== 12)
+      throw new Error("Nonce must be 12 bytes");
     const cryptoKey = await crypto.subtle.importKey(
       "raw",
       key,
-      { name: "AES-CBC" },
+      { name: "AES-GCM" },
       false,
       ["encrypt"]
     );
-    const ciphertext = await crypto.subtle.encrypt(
-      { name: "AES-CBC", iv },
+    const encrypted = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: nonce, tagLength: 128 },
       cryptoKey,
       plaintext
     );
-    return new Uint8Array(ciphertext);
+    const encryptedArray = new Uint8Array(encrypted);
+    const ciphertext = encryptedArray.slice(0, -16);
+    const tag = encryptedArray.slice(-16);
+    return { ciphertext, tag };
   }
-  async function aes256CbcDecrypt(ciphertext, key, iv) {
+  async function aes256GcmDecrypt(ciphertext, key, nonce, tag) {
+    if (key.length !== 32)
+      throw new Error("Key must be 32 bytes");
+    if (nonce.length !== 12)
+      throw new Error("Nonce must be 12 bytes");
+    if (tag.length !== 16)
+      throw new Error("Tag must be 16 bytes");
     const cryptoKey = await crypto.subtle.importKey(
       "raw",
       key,
-      { name: "AES-CBC" },
+      { name: "AES-GCM" },
       false,
       ["decrypt"]
     );
-    const plaintext = await crypto.subtle.decrypt(
-      { name: "AES-CBC", iv },
+    const combined = concatBytes(ciphertext, tag);
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: nonce, tagLength: 128 },
       cryptoKey,
-      ciphertext
+      combined
     );
-    return new Uint8Array(plaintext);
-  }
-  async function hmacSha256(key, data) {
-    const cryptoKey = await crypto.subtle.importKey(
-      "raw",
-      key,
-      { name: "HMAC", hash: { name: "SHA-256" } },
-      false,
-      ["sign"]
-    );
-    const mac = await crypto.subtle.sign("HMAC", cryptoKey, data);
-    return new Uint8Array(mac);
+    return new Uint8Array(decrypted);
   }
   async function normalizePrivateKeyTo32Bytes(wifOrHex) {
     if (typeof wifOrHex !== "string" || wifOrHex.length === 0) {
@@ -4663,38 +4656,31 @@ var neuraiDepinMsg = (() => {
     const recipientPackage = msg.recipientKeys.get(keyIdHex) ?? msg.recipientKeys.get(keyIdHexReversed);
     if (!recipientPackage)
       return null;
-    if (recipientPackage.length < 16 + 32 + 32)
+    if (recipientPackage.length < 12 + 32 + 16)
       return null;
-    const recipientIV = recipientPackage.slice(0, 16);
-    const encryptedAESKey = recipientPackage.slice(16, recipientPackage.length - 32);
-    const recipientHmac = recipientPackage.slice(recipientPackage.length - 32);
+    const recipientNonce = recipientPackage.slice(0, 12);
+    const encryptedAESKey = recipientPackage.slice(12, recipientPackage.length - 16);
+    const recipientTag = recipientPackage.slice(recipientPackage.length - 16);
     const sharedPointCompressed = secp256k1.pointMultiply(msg.ephemeralPubKey, recipientPrivKeyBytes, true);
     const sharedSecret = await sha256(sharedPointCompressed);
     const encKey = await kdfSha256(sharedSecret, 32);
-    const expectedRecipientHmac = await hmacSha256(encKey, encryptedAESKey);
-    if (!timingSafeEqual(expectedRecipientHmac, recipientHmac))
-      return null;
-    let aesKeyRaw;
+    let aesKey;
     try {
-      aesKeyRaw = await aes256CbcDecrypt(encryptedAESKey, encKey, recipientIV);
+      aesKey = await aes256GcmDecrypt(encryptedAESKey, encKey, recipientNonce, recipientTag);
     } catch {
       return null;
     }
-    if (aesKeyRaw.length < 32)
+    if (aesKey.length !== 32)
       return null;
-    const aesKey = aesKeyRaw.slice(0, 32);
     const payload = msg.encryptedPayload;
-    if (payload.length < 16 + 1 + 32)
+    if (payload.length < 12 + 1 + 16)
       return null;
-    const iv = payload.slice(0, 16);
-    const ciphertext = payload.slice(16, payload.length - 32);
-    const payloadHmac = payload.slice(payload.length - 32);
-    const expectedPayloadHmac = await hmacSha256(aesKey, ciphertext);
-    if (!timingSafeEqual(expectedPayloadHmac, payloadHmac))
-      return null;
+    const payloadNonce = payload.slice(0, 12);
+    const ciphertext = payload.slice(12, payload.length - 16);
+    const payloadTag = payload.slice(payload.length - 16);
     let plaintextBytes;
     try {
-      plaintextBytes = await aes256CbcDecrypt(ciphertext, aesKey, iv);
+      plaintextBytes = await aes256GcmDecrypt(ciphertext, aesKey, payloadNonce, payloadTag);
     } catch {
       return null;
     }
@@ -4708,10 +4694,9 @@ var neuraiDepinMsg = (() => {
       throw new Error("Failed to generate ephemeral public key");
     }
     const aesKey = await kdfSha256(ephemeralPrivKey, 32);
-    const iv = randomBytes(16);
-    const ciphertext = await aes256CbcEncrypt(plaintext, aesKey, iv);
-    const payloadHmac = await hmacSha256(aesKey, ciphertext);
-    const payload = concatBytes(iv, ciphertext, payloadHmac);
+    const nonce = randomBytes(12);
+    const { ciphertext, tag } = await aes256GcmEncrypt(plaintext, aesKey, nonce);
+    const payload = concatBytes(nonce, ciphertext, tag);
     const recipientKeys = /* @__PURE__ */ new Map();
     for (const recipientPubKey of recipientPubKeys) {
       if (!(recipientPubKey instanceof Uint8Array) || recipientPubKey.length !== 33) {
@@ -4720,10 +4705,9 @@ var neuraiDepinMsg = (() => {
       const sharedPointCompressed = secp256k1.pointMultiply(recipientPubKey, ephemeralPrivKey, true);
       const sharedSecret = await sha256(sharedPointCompressed);
       const encKey = await kdfSha256(sharedSecret, 32);
-      const recipientIV = randomBytes(16);
-      const encryptedAESKey = await aes256CbcEncrypt(aesKey, encKey, recipientIV);
-      const recipientHmac = await hmacSha256(encKey, encryptedAESKey);
-      const recipientPackage = concatBytes(recipientIV, encryptedAESKey, recipientHmac);
+      const recipientNonce = randomBytes(12);
+      const { ciphertext: encryptedAESKey, tag: recipientTag } = await aes256GcmEncrypt(aesKey, encKey, recipientNonce);
+      const recipientPackage = concatBytes(recipientNonce, encryptedAESKey, recipientTag);
       const keyHash = await hash160(recipientPubKey);
       const keyHashHex = bytesToHex(keyHash);
       recipientKeys.set(keyHashHex, recipientPackage);

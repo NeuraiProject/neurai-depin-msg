@@ -428,6 +428,64 @@ async function aes256CbcDecrypt(ciphertext, key, iv) {
   return new Uint8Array(plaintext);
 }
 
+/**
+ * AES-256-GCM encryption
+ * @param {Uint8Array} plaintext
+ * @param {Uint8Array} key - 32 bytes
+ * @param {Uint8Array} nonce - 12 bytes
+ * @returns {Promise<{ciphertext: Uint8Array, tag: Uint8Array}>}
+ */
+async function aes256GcmEncrypt(plaintext, key, nonce) {
+  if (key.length !== 32) throw new Error('Key must be 32 bytes');
+  if (nonce.length !== 12) throw new Error('Nonce must be 12 bytes');
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw', key, { name: 'AES-GCM' }, false, ['encrypt']
+  );
+
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce, tagLength: 128 },
+    cryptoKey,
+    plaintext
+  );
+
+  const encryptedArray = new Uint8Array(encrypted);
+  // WebCrypto appends the 16-byte auth tag at the end
+  const ciphertext = encryptedArray.slice(0, -16);
+  const tag = encryptedArray.slice(-16);
+
+  return { ciphertext, tag };
+}
+
+/**
+ * AES-256-GCM decryption
+ * @param {Uint8Array} ciphertext
+ * @param {Uint8Array} key - 32 bytes
+ * @param {Uint8Array} nonce - 12 bytes
+ * @param {Uint8Array} tag - 16 bytes
+ * @returns {Promise<Uint8Array>}
+ */
+async function aes256GcmDecrypt(ciphertext, key, nonce, tag) {
+  if (key.length !== 32) throw new Error('Key must be 32 bytes');
+  if (nonce.length !== 12) throw new Error('Nonce must be 12 bytes');
+  if (tag.length !== 16) throw new Error('Tag must be 16 bytes');
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
+  );
+
+  // Concatenate ciphertext and tag for WebCrypto
+  const combined = concatBytes(ciphertext, tag);
+
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: nonce, tagLength: 128 },
+    cryptoKey,
+    combined
+  );
+
+  return new Uint8Array(decrypted);
+}
+
 async function hmacSha256(key, data) {
   const cryptoKey = await crypto.subtle.importKey(
     'raw',
@@ -485,43 +543,40 @@ async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipien
 
   const recipientPackage = msg.recipientKeys.get(keyIdHex) ?? msg.recipientKeys.get(keyIdHexReversed);
   if (!recipientPackage) return null;
-  if (recipientPackage.length < 16 + 32 + 32) return null;
+  // GCM format: Nonce(12) + encrypted_key(32) + Tag(16) = 60 bytes minimum
+  if (recipientPackage.length < 12 + 32 + 16) return null;
 
-  const recipientIV = recipientPackage.slice(0, 16);
-  const encryptedAESKey = recipientPackage.slice(16, recipientPackage.length - 32);
-  const recipientHmac = recipientPackage.slice(recipientPackage.length - 32);
+  const recipientNonce = recipientPackage.slice(0, 12);
+  const encryptedAESKey = recipientPackage.slice(12, recipientPackage.length - 16);
+  const recipientTag = recipientPackage.slice(recipientPackage.length - 16);
 
   // ECDH secret must match Core's ecdh module: SHA256(compressed(shared_point))
   const sharedPointCompressed = secp256k1.pointMultiply(msg.ephemeralPubKey, recipientPrivKeyBytes, true);
   const sharedSecret = await sha256(sharedPointCompressed);
   const encKey = await kdfSha256(sharedSecret, 32);
 
-  const expectedRecipientHmac = await hmacSha256(encKey, encryptedAESKey);
-  if (!timingSafeEqual(expectedRecipientHmac, recipientHmac)) return null;
-
-  let aesKeyRaw;
+  // Decrypt AES key with GCM (tag verified automatically)
+  let aesKey;
   try {
-    aesKeyRaw = await aes256CbcDecrypt(encryptedAESKey, encKey, recipientIV);
+    aesKey = await aes256GcmDecrypt(encryptedAESKey, encKey, recipientNonce, recipientTag);
   } catch {
-    return null;
+    return null; // Authentication failed
   }
-  if (aesKeyRaw.length < 32) return null;
-  const aesKey = aesKeyRaw.slice(0, 32);
+  if (aesKey.length !== 32) return null;
 
   const payload = msg.encryptedPayload;
-  if (payload.length < 16 + 1 + 32) return null;
-  const iv = payload.slice(0, 16);
-  const ciphertext = payload.slice(16, payload.length - 32);
-  const payloadHmac = payload.slice(payload.length - 32);
+  // GCM format: Nonce(12) + ciphertext + Tag(16) = 28 bytes minimum
+  if (payload.length < 12 + 1 + 16) return null;
+  const payloadNonce = payload.slice(0, 12);
+  const ciphertext = payload.slice(12, payload.length - 16);
+  const payloadTag = payload.slice(payload.length - 16);
 
-  const expectedPayloadHmac = await hmacSha256(aesKey, ciphertext);
-  if (!timingSafeEqual(expectedPayloadHmac, payloadHmac)) return null;
-
+  // Decrypt payload with GCM (tag verified automatically)
   let plaintextBytes;
   try {
-    plaintextBytes = await aes256CbcDecrypt(ciphertext, aesKey, iv);
+    plaintextBytes = await aes256GcmDecrypt(ciphertext, aesKey, payloadNonce, payloadTag);
   } catch {
-    return null;
+    return null; // Authentication failed
   }
 
   const decoder = new TextDecoder();
@@ -533,11 +588,11 @@ async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipien
 // ============================================
 
 async function eciesEncrypt(plaintext, recipientPubKeys) {
-  // Neurai Core-compatible hybrid ECIES (see src/depinecies.cpp)
+  // Neurai Core-compatible hybrid ECIES with AES-256-GCM (see src/depinecies.cpp)
   // - Ephemeral keypair per message
   // - AES key derived from ephemeral privkey via KDF_SHA256
-  // - Payload: [IV(16) || ciphertext || HMAC_SHA256(aesKey, ciphertext)]
-  // - Per-recipient package: [recipientIV(16) || AES256_CBC(encKey, aesKey) || HMAC_SHA256(encKey, encryptedAESKey)]
+  // - Payload: [Nonce(12) || ciphertext || Tag(16)]
+  // - Per-recipient package: [Nonce(12) || AES256_GCM(encKey, aesKey) || Tag(16)]
   // - encKey derived from ECDH secret (secp256k1_ecdh default), then KDF_SHA256
 
   // Generate ephemeral key pair
@@ -550,13 +605,12 @@ async function eciesEncrypt(plaintext, recipientPubKeys) {
   // Derive AES key from ephemeral private key (matches KDF_SHA256 in C++)
   const aesKey = await kdfSha256(ephemeralPrivKey, 32);
 
-  // Encrypt message with AES-256-CBC (PKCS7 padding)
-  const iv = randomBytes(16);
-  const ciphertext = await aes256CbcEncrypt(plaintext, aesKey, iv);
+  // Encrypt message with AES-256-GCM (no padding needed)
+  const nonce = randomBytes(12);
+  const { ciphertext, tag } = await aes256GcmEncrypt(plaintext, aesKey, nonce);
 
-  // HMAC over ciphertext only (matches C++)
-  const payloadHmac = await hmacSha256(aesKey, ciphertext);
-  const payload = concatBytes(iv, ciphertext, payloadHmac);
+  // Payload format: [Nonce(12) || ciphertext || Tag(16)]
+  const payload = concatBytes(nonce, ciphertext, tag);
 
   // For each recipient, encrypt the AES key
   const recipientKeys = new Map();
@@ -574,14 +628,12 @@ async function eciesEncrypt(plaintext, recipientPubKeys) {
     // Derive per-recipient encryption key
     const encKey = await kdfSha256(sharedSecret, 32);
 
-    // Encrypt the AES key using AES-256-CBC with random per-recipient IV
-    const recipientIV = randomBytes(16);
-    const encryptedAESKey = await aes256CbcEncrypt(aesKey, encKey, recipientIV);
+    // Encrypt the AES key using AES-256-GCM with random per-recipient nonce
+    const recipientNonce = randomBytes(12);
+    const { ciphertext: encryptedAESKey, tag: recipientTag } = await aes256GcmEncrypt(aesKey, encKey, recipientNonce);
 
-    // HMAC over encrypted AES key
-    const recipientHmac = await hmacSha256(encKey, encryptedAESKey);
-
-    const recipientPackage = concatBytes(recipientIV, encryptedAESKey, recipientHmac);
+    // Recipient package format: [Nonce(12) || encrypted_aes_key(32) || Tag(16)]
+    const recipientPackage = concatBytes(recipientNonce, encryptedAESKey, recipientTag);
 
     // Map key is address hash160 (CKeyID): Hash160(serialized pubkey)
     const keyHash = await hash160(recipientPubKey);

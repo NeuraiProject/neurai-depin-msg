@@ -817,14 +817,20 @@ async function wrapMessageForServer(messageHex, serverPubKeyHex, senderAddress) 
   if (!normalizedMsg) throw new Error('Invalid messageHex');
   if (!normalizedServerPk) throw new Error('Invalid serverPubKeyHex');
 
-  const messageBytes = hexToBytes(normalizedMsg);
   const serverPubKey = hexToBytes(normalizedServerPk);
   
   if (serverPubKey.length !== 33) {
     throw new Error('Server public key must be 33 bytes compressed');
   }
 
-  // ECIES encrypt specifically for the server's pool key
+  // ECIES encrypt specifically for the server's pool key.
+  // IMPORTANT: The server decrypts this and expects to find a HEX STRING string in the output
+  // (processed by IsHex() in the node).
+  // Therefore, we must encrypt the HEX STRING itself (as UTF-8 bytes), 
+  // NOT the raw binary bytes of the message.
+  const encoder = new TextEncoder();
+  const messageBytes = encoder.encode(normalizedMsg);
+
   const eciesMsg = await eciesEncrypt(messageBytes, [serverPubKey]);
   const serializedECIES = serializeEciesMessage(eciesMsg);
 

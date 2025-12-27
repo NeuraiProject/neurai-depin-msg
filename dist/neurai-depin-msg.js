@@ -4839,11 +4839,12 @@ var neuraiDepinMsg = (() => {
       throw new Error("Invalid messageHex");
     if (!normalizedServerPk)
       throw new Error("Invalid serverPubKeyHex");
-    const messageBytes = hexToBytes(normalizedMsg);
     const serverPubKey = hexToBytes(normalizedServerPk);
     if (serverPubKey.length !== 33) {
       throw new Error("Server public key must be 33 bytes compressed");
     }
+    const encoder = new TextEncoder();
+    const messageBytes = encoder.encode(normalizedMsg);
     const eciesMsg = await eciesEncrypt(messageBytes, [serverPubKey]);
     const serializedECIES = serializeEciesMessage(eciesMsg);
     return {

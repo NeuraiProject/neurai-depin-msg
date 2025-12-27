@@ -802,9 +802,62 @@ async function buildDepinMessage(params) {
   };
 }
 
+/**
+ * wrapMessageForServer
+ * Encrypts a serialized CDepinMessage hex for the server's public key.
+ */
+async function wrapMessageForServer(messageHex, serverPubKeyHex, senderAddress) {
+  if (!messageHex || !serverPubKeyHex || !senderAddress) {
+    throw new Error('messageHex, serverPubKeyHex, and senderAddress are required');
+  }
+
+  const normalizedMsg = normalizeHex(messageHex);
+  const normalizedServerPk = normalizeHex(serverPubKeyHex);
+  
+  if (!normalizedMsg) throw new Error('Invalid messageHex');
+  if (!normalizedServerPk) throw new Error('Invalid serverPubKeyHex');
+
+  const messageBytes = hexToBytes(normalizedMsg);
+  const serverPubKey = hexToBytes(normalizedServerPk);
+  
+  if (serverPubKey.length !== 33) {
+    throw new Error('Server public key must be 33 bytes compressed');
+  }
+
+  // ECIES encrypt specifically for the server's pool key
+  const eciesMsg = await eciesEncrypt(messageBytes, [serverPubKey]);
+  const serializedECIES = serializeEciesMessage(eciesMsg);
+
+  return {
+    sender: senderAddress,
+    encrypted: bytesToHex(serializedECIES)
+  };
+}
+
+/**
+ * unwrapMessageFromServer
+ * Decrypts a full privacy-wrapped response (serialized JSON array) from depinreceivemsg.
+ */
+async function unwrapMessageFromServer(encryptedHex, recipientPrivateKeyWifOrHex) {
+    if (!encryptedHex || !recipientPrivateKeyWifOrHex) {
+        throw new Error('encryptedHex and recipientPrivateKey are required');
+    }
+
+    let privKeyHex = recipientPrivateKeyWifOrHex;
+    if (isWIF(privKeyHex)) {
+        privKeyHex = await wifToHex(privKeyHex);
+    }
+
+    const decrypted = await decryptDepinReceiveEncryptedPayload(encryptedHex, privKeyHex);
+    return decrypted; // Returns the JSON string containing the message array
+}
+
 // Export for browser (IIFE global)
+
 export {
   buildDepinMessage,
+  wrapMessageForServer,
+  unwrapMessageFromServer,
   decryptDepinReceiveEncryptedPayload,
   wifToHex,
   isWIF,
@@ -820,6 +873,8 @@ export {
 if (typeof globalThis !== 'undefined') {
   globalThis.neuraiDepinMsg = {
     buildDepinMessage,
+    wrapMessageForServer,
+    unwrapMessageFromServer,
     decryptDepinReceiveEncryptedPayload,
     wifToHex,
     isWIF,

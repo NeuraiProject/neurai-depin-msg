@@ -4229,7 +4229,9 @@ var neuraiDepinMsg = (() => {
     hexToBytes: () => hexToBytes,
     isWIF: () => isWIF,
     sha256: () => sha256,
-    wifToHex: () => wifToHex
+    unwrapMessageFromServer: () => unwrapMessageFromServer,
+    wifToHex: () => wifToHex,
+    wrapMessageForServer: () => wrapMessageForServer
   });
   var secp256k1 = __toESM(require_dist());
   function writeCompactSize(value) {
@@ -4827,9 +4829,44 @@ var neuraiDepinMsg = (() => {
       recipientCount: recipientPubKeys.length
     };
   }
+  async function wrapMessageForServer(messageHex, serverPubKeyHex, senderAddress) {
+    if (!messageHex || !serverPubKeyHex || !senderAddress) {
+      throw new Error("messageHex, serverPubKeyHex, and senderAddress are required");
+    }
+    const normalizedMsg = normalizeHex(messageHex);
+    const normalizedServerPk = normalizeHex(serverPubKeyHex);
+    if (!normalizedMsg)
+      throw new Error("Invalid messageHex");
+    if (!normalizedServerPk)
+      throw new Error("Invalid serverPubKeyHex");
+    const messageBytes = hexToBytes(normalizedMsg);
+    const serverPubKey = hexToBytes(normalizedServerPk);
+    if (serverPubKey.length !== 33) {
+      throw new Error("Server public key must be 33 bytes compressed");
+    }
+    const eciesMsg = await eciesEncrypt(messageBytes, [serverPubKey]);
+    const serializedECIES = serializeEciesMessage(eciesMsg);
+    return {
+      sender: senderAddress,
+      encrypted: bytesToHex(serializedECIES)
+    };
+  }
+  async function unwrapMessageFromServer(encryptedHex, recipientPrivateKeyWifOrHex) {
+    if (!encryptedHex || !recipientPrivateKeyWifOrHex) {
+      throw new Error("encryptedHex and recipientPrivateKey are required");
+    }
+    let privKeyHex = recipientPrivateKeyWifOrHex;
+    if (isWIF(privKeyHex)) {
+      privKeyHex = await wifToHex(privKeyHex);
+    }
+    const decrypted = await decryptDepinReceiveEncryptedPayload(encryptedHex, privKeyHex);
+    return decrypted;
+  }
   if (typeof globalThis !== "undefined") {
     globalThis.neuraiDepinMsg = {
       buildDepinMessage,
+      wrapMessageForServer,
+      unwrapMessageFromServer,
       decryptDepinReceiveEncryptedPayload,
       wifToHex,
       isWIF,

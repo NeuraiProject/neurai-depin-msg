@@ -4752,6 +4752,10 @@ var neuraiDepinMsg = (() => {
     if (!params.senderPubKey || params.senderPubKey.length !== 66) {
       throw new Error("Sender public key must be 66 hex characters");
     }
+    const messageType = params.messageType;
+    if (messageType && messageType !== "private" && messageType !== "group") {
+      throw new Error('messageType must be "private" or "group"');
+    }
     let privateKeyHex = params.privateKey;
     if (!privateKeyHex) {
       throw new Error("Private key is required");
@@ -4768,6 +4772,15 @@ var neuraiDepinMsg = (() => {
       throw new Error("Message is required");
     if (!params.recipientPubKeys || params.recipientPubKeys.length === 0) {
       throw new Error("At least one recipient is required");
+    }
+    if (messageType === "private") {
+      const senderHex2 = params.senderPubKey.toLowerCase();
+      const uniqueRecipients = new Set(
+        params.recipientPubKeys.map((pk) => pk.toLowerCase()).concat(senderHex2)
+      );
+      if (uniqueRecipients.size > 2) {
+        throw new Error('messageType "private" allows only one recipient plus the sender');
+      }
     }
     if (!params.timestamp || params.timestamp <= 0) {
       throw new Error("Timestamp must be positive");
@@ -4826,7 +4839,8 @@ var neuraiDepinMsg = (() => {
       messageHash,
       messageHashBytes: bytesToHex(messageHashBytes),
       encryptedSize: encryptedPayload.length,
-      recipientCount: recipientPubKeys.length
+      recipientCount: recipientPubKeys.length,
+      messageType: messageType || "group"
     };
   }
   async function wrapMessageForServer(messageHex, serverPubKeyHex, senderAddress) {

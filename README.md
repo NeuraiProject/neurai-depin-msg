@@ -104,6 +104,7 @@ Builds a complete serialized `CDepinMessage` (as hex) suitable for `depinsubmitm
 | `timestamp` | `number` | yes | Unix time (seconds) |
 | `message` | `string` | yes | Plaintext message (UTF-8) |
 | `recipientPubKeys` | `string[]` | yes | Recipient compressed pubkeys as hex (66 chars each). The sender pubkey is automatically added if missing so you can decrypt your own messages. |
+| `messageType` | `"private" \| "group"` | no | Metadata hint; when `"private"`, allows only one recipient plus the sender. Defaults to `"group"`. |
 
 ### `neuraiDepinMsg.decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipientPrivateKey)`
 
@@ -127,6 +128,7 @@ Notes:
 | `messageHashBytes` | `string` | Raw 32-byte digest as hex (not reversed) |
 | `encryptedSize` | `number` | Size of the serialized `CECIESEncryptedMessage` in bytes |
 | `recipientCount` | `number` | Number of recipients (including sender if auto-added) |
+| `messageType` | `"private" \| "group"` | Returned message type metadata (defaults to `"group"`). |
 
 ## How it works (Core-compatible)
 

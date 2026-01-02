@@ -691,6 +691,10 @@ async function buildDepinMessage(params) {
   if (!params.senderPubKey || params.senderPubKey.length !== 66) {
     throw new Error('Sender public key must be 66 hex characters');
   }
+  const messageType = params.messageType;
+  if (messageType && messageType !== 'private' && messageType !== 'group') {
+    throw new Error('messageType must be "private" or "group"');
+  }
   
   // Handle private key - can be WIF or hex
   let privateKeyHex = params.privateKey;
@@ -712,6 +716,15 @@ async function buildDepinMessage(params) {
   if (!params.message) throw new Error('Message is required');
   if (!params.recipientPubKeys || params.recipientPubKeys.length === 0) {
     throw new Error('At least one recipient is required');
+  }
+  if (messageType === 'private') {
+    const senderHex = params.senderPubKey.toLowerCase();
+    const uniqueRecipients = new Set(
+      params.recipientPubKeys.map(pk => pk.toLowerCase()).concat(senderHex)
+    );
+    if (uniqueRecipients.size > 2) {
+      throw new Error('messageType "private" allows only one recipient plus the sender');
+    }
   }
   if (!params.timestamp || params.timestamp <= 0) {
     throw new Error('Timestamp must be positive');
@@ -798,7 +811,8 @@ async function buildDepinMessage(params) {
     messageHash,
     messageHashBytes: bytesToHex(messageHashBytes),
     encryptedSize: encryptedPayload.length,
-    recipientCount: recipientPubKeys.length
+    recipientCount: recipientPubKeys.length,
+    messageType: messageType || 'group'
   };
 }
 

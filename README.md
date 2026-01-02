@@ -153,11 +153,21 @@ All fields are serialized using Bitcoin-style rules:
 - CompactSize prefixes for vectors/strings
 - Little-endian integers
 
+**Message structure:**
+```
+[token (string)]
+[senderAddress (string)]
+[timestamp (int64)]
+[messageType (uint8)]       // 0x01 = private, 0x02 = group
+[encryptedPayload (vector)]
+[signature (vector)]
+```
+
 ### Signing
 
 The signature hash is:
 
-`doubleSHA256( serialize(token) || serialize(senderAddress) || int64(timestamp) || vector(encryptedPayloadBytes) )`
+`doubleSHA256( serialize(token) || serialize(senderAddress) || int64(timestamp) || uint8(messageType) || vector(encryptedPayloadBytes) )`
 
 `messageHash` is the display-friendly byte-reversed form (similar to how Core prints `uint256`).
 

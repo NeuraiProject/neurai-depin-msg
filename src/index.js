@@ -757,11 +757,15 @@ async function buildDepinMessage(params) {
   const eciesMsg = await eciesEncrypt(messageBytes, recipientPubKeys);
   const encryptedPayload = serializeEciesMessage(eciesMsg);
 
+  // Convert messageType to byte (0x01 = private, 0x02 = group)
+  const messageTypeByte = messageType === 'private' ? 0x01 : 0x02;
+
   // Build hash data for signing
   const hashData = concatBytes(
     serializeString(params.token),
     serializeString(params.senderAddress),
     serializeInt64(params.timestamp),
+    new Uint8Array([messageTypeByte]),
     serializeVector(encryptedPayload)
   );
 
@@ -801,12 +805,14 @@ async function buildDepinMessage(params) {
   }
 
   // Serialize complete message
+  // Order: [token][senderAddress][timestamp][messageType][encryptedPayload][signature]
   const serialized = concatBytes(
     serializeString(params.token),
     serializeString(params.senderAddress),
     serializeInt64(params.timestamp),
-    serializeVector(signature),
-    serializeVector(encryptedPayload)
+    new Uint8Array([messageTypeByte]),
+    serializeVector(encryptedPayload),
+    serializeVector(signature)
   );
 
   return {

@@ -4803,10 +4803,12 @@ var neuraiDepinMsg = (() => {
     const messageBytes = encoder.encode(params.message);
     const eciesMsg = await eciesEncrypt(messageBytes, recipientPubKeys);
     const encryptedPayload = serializeEciesMessage(eciesMsg);
+    const messageTypeByte = messageType === "private" ? 1 : 2;
     const hashData = concatBytes(
       serializeString(params.token),
       serializeString(params.senderAddress),
       serializeInt64(params.timestamp),
+      new Uint8Array([messageTypeByte]),
       serializeVector(encryptedPayload)
     );
     const messageHashBytes = await doubleSha256(hashData);
@@ -4834,8 +4836,9 @@ var neuraiDepinMsg = (() => {
       serializeString(params.token),
       serializeString(params.senderAddress),
       serializeInt64(params.timestamp),
-      serializeVector(signature),
-      serializeVector(encryptedPayload)
+      new Uint8Array([messageTypeByte]),
+      serializeVector(encryptedPayload),
+      serializeVector(signature)
     );
     return {
       hex: bytesToHex(serialized),

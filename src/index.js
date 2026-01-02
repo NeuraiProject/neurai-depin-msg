@@ -691,8 +691,11 @@ async function buildDepinMessage(params) {
   if (!params.senderPubKey || params.senderPubKey.length !== 66) {
     throw new Error('Sender public key must be 66 hex characters');
   }
+  if (!params.messageType) {
+    throw new Error('messageType is required');
+  }
   const messageType = params.messageType;
-  if (messageType && messageType !== 'private' && messageType !== 'group') {
+  if (messageType !== 'private' && messageType !== 'group') {
     throw new Error('messageType must be "private" or "group"');
   }
   
@@ -812,7 +815,7 @@ async function buildDepinMessage(params) {
     messageHashBytes: bytesToHex(messageHashBytes),
     encryptedSize: encryptedPayload.length,
     recipientCount: recipientPubKeys.length,
-    messageType: messageType || 'group'
+    messageType: messageType
   };
 }
 

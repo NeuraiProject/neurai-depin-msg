@@ -40,7 +40,8 @@ Include the bundled build (IIFE). It exposes a global `neuraiDepinMsg` object.
       recipientPubKeys: [
         '02deadbeef... (recipient 1 compressed pubkey)',
         '03cafebabe... (recipient 2 compressed pubkey)'
-      ]
+      ],
+      messageType: 'group'
     });
 
     console.log('depinsubmitmsg hex:', res.hex);
@@ -79,7 +80,8 @@ const res = await buildDepinMessage({
   privateKey: 'L... (WIF) OR 64-hex private key',
   timestamp: Math.floor(Date.now() / 1000),
   message: 'Hello from Node!',
-  recipientPubKeys: ['02deadbeef...']
+  recipientPubKeys: ['02deadbeef...'],
+  messageType: 'private'
 });
 
 console.log(res.hex);
@@ -104,7 +106,7 @@ Builds a complete serialized `CDepinMessage` (as hex) suitable for `depinsubmitm
 | `timestamp` | `number` | yes | Unix time (seconds) |
 | `message` | `string` | yes | Plaintext message (UTF-8) |
 | `recipientPubKeys` | `string[]` | yes | Recipient compressed pubkeys as hex (66 chars each). The sender pubkey is automatically added if missing so you can decrypt your own messages. |
-| `messageType` | `"private" \| "group"` | no | Metadata hint; when `"private"`, allows only one recipient plus the sender. Defaults to `"group"`. |
+| `messageType` | `"private" \| "group"` | yes | Message type: `"private"` allows only one recipient plus the sender, `"group"` allows multiple recipients. |
 
 ### `neuraiDepinMsg.decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipientPrivateKey)`
 
@@ -128,7 +130,7 @@ Notes:
 | `messageHashBytes` | `string` | Raw 32-byte digest as hex (not reversed) |
 | `encryptedSize` | `number` | Size of the serialized `CECIESEncryptedMessage` in bytes |
 | `recipientCount` | `number` | Number of recipients (including sender if auto-added) |
-| `messageType` | `"private" \| "group"` | Returned message type metadata (defaults to `"group"`). |
+| `messageType` | `"private" \| "group"` | The message type that was specified in the parameters. |
 
 ## How it works (Core-compatible)
 

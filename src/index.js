@@ -5,7 +5,7 @@
  * Self-contained library with bundled secp256k1
  */
 
-import * as secp256k1 from '@bitcoinerlab/secp256k1';
+import { secp256k1 } from '@noble/curves/secp256k1';
 
 // ============================================
 // SERIALIZATION UTILITIES
@@ -180,52 +180,6 @@ function deserializeEciesMessage(serialized) {
   }
 
   return { ephemeralPubKey, encryptedPayload, recipientKeys };
-}
-
-/**
- * Encode ECDSA signature to DER format
- * Takes 64-byte raw signature (32 bytes r + 32 bytes s) and converts to DER
- */
-function encodeDER(signature) {
-  if (signature.length !== 64) {
-    throw new Error('Raw signature must be 64 bytes');
-  }
-
-  const r = signature.slice(0, 32);
-  const s = signature.slice(32, 64);
-
-  // Helper to encode an integer in DER format
-  function encodeInteger(value) {
-    // Remove leading zeros (but keep one if needed for sign bit)
-    let i = 0;
-    while (i < value.length - 1 && value[i] === 0 && (value[i + 1] & 0x80) === 0) {
-      i++;
-    }
-    const trimmed = value.slice(i);
-
-    // If high bit is set, prepend 0x00 to indicate positive number
-    const needsPadding = (trimmed[0] & 0x80) !== 0;
-    const paddedValue = needsPadding
-      ? concatBytes(new Uint8Array([0x00]), trimmed)
-      : trimmed;
-
-    // DER integer: 0x02 (INTEGER tag) + length + value
-    return concatBytes(
-      new Uint8Array([0x02, paddedValue.length]),
-      paddedValue
-    );
-  }
-
-  const rDER = encodeInteger(r);
-  const sDER = encodeInteger(s);
-
-  // DER sequence: 0x30 (SEQUENCE tag) + length + rDER + sDER
-  const sequenceLength = rDER.length + sDER.length;
-  return concatBytes(
-    new Uint8Array([0x30, sequenceLength]),
-    rDER,
-    sDER
-  );
 }
 
 // ============================================
@@ -532,7 +486,7 @@ async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipien
   const msg = deserializeEciesMessage(serialized);
 
   const recipientPrivKeyBytes = await normalizePrivateKeyTo32Bytes(recipientPrivateKey);
-  const recipientPubKeyCompressed = secp256k1.pointFromScalar(recipientPrivKeyBytes, true);
+  const recipientPubKeyCompressed = secp256k1.getPublicKey(recipientPrivKeyBytes, true);
   if (!(recipientPubKeyCompressed instanceof Uint8Array) || recipientPubKeyCompressed.length !== 33) {
     throw new Error('Failed to derive recipient public key');
   }
@@ -551,7 +505,8 @@ async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipien
   const recipientTag = recipientPackage.slice(recipientPackage.length - 16);
 
   // ECDH secret must match Core's ecdh module: SHA256(compressed(shared_point))
-  const sharedPointCompressed = secp256k1.pointMultiply(msg.ephemeralPubKey, recipientPrivKeyBytes, true);
+  // getSharedSecret(priv, pub) == pointMultiply(pub, priv): raw compressed ECDH point.
+  const sharedPointCompressed = secp256k1.getSharedSecret(recipientPrivKeyBytes, msg.ephemeralPubKey, true);
   const sharedSecret = await sha256(sharedPointCompressed);
   const encKey = await kdfSha256(sharedSecret, 32);
 
@@ -584,7 +539,7 @@ async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipien
 }
 
 // ============================================
-// ECIES ENCRYPTION (using @bitcoinerlab/secp256k1)
+// ECIES ENCRYPTION (using @noble/curves/secp256k1)
 // ============================================
 
 async function eciesEncrypt(plaintext, recipientPubKeys) {
@@ -597,7 +552,7 @@ async function eciesEncrypt(plaintext, recipientPubKeys) {
 
   // Generate ephemeral key pair
   const ephemeralPrivKey = randomBytes(32);
-  const ephemeralPubKey = secp256k1.pointFromScalar(ephemeralPrivKey, true);
+  const ephemeralPubKey = secp256k1.getPublicKey(ephemeralPrivKey, true);
   if (!(ephemeralPubKey instanceof Uint8Array) || ephemeralPubKey.length !== 33) {
     throw new Error('Failed to generate ephemeral public key');
   }
@@ -622,7 +577,7 @@ async function eciesEncrypt(plaintext, recipientPubKeys) {
 
     // ECDH secret must match libsecp256k1's default: SHA256(compressed(shared_point))
     // See src/secp256k1/src/modules/ecdh/main_impl.h
-    const sharedPointCompressed = secp256k1.pointMultiply(recipientPubKey, ephemeralPrivKey, true);
+    const sharedPointCompressed = secp256k1.getSharedSecret(ephemeralPrivKey, recipientPubKey, true);
     const sharedSecret = await sha256(sharedPointCompressed);
 
     // Derive per-recipient encryption key
@@ -776,33 +731,9 @@ async function buildDepinMessage(params) {
   // This makes `messageHash` match what you'll see in debug.log.
   const messageHash = bytesToHex(messageHashBytes.slice().reverse());
 
-  // Sign with secp256k1
-  const sigResult = secp256k1.sign(messageHashBytes, privateKey);
-
-  // Convert to DER format if needed
-  let signature;
-  if (sigResult instanceof Uint8Array) {
-    // Check if it's raw (64 bytes) or already DER (70-72 bytes typically)
-    if (sigResult.length === 64) {
-      // Raw signature - convert to DER
-      signature = encodeDER(sigResult);
-    } else {
-      // Assume already DER
-      signature = sigResult;
-    }
-  } else if (typeof sigResult === 'object' && sigResult.toDER) {
-    // Some libraries provide toDER method
-    signature = sigResult.toDER();
-  } else if (typeof sigResult === 'object' && sigResult.signature) {
-    // Some libraries return { signature, recovery }
-    if (sigResult.signature.length === 64) {
-      signature = encodeDER(sigResult.signature);
-    } else {
-      signature = sigResult.signature;
-    }
-  } else {
-    throw new Error('Unknown signature format from secp256k1.sign()');
-  }
+  // Sign with secp256k1 (noble: deterministic RFC6979, low-S canonical by default).
+  // .toDERRawBytes() yields the DER-encoded signature expected by Neurai Core.
+  const signature = secp256k1.sign(messageHashBytes, privateKey).toDERRawBytes();
 
   // Serialize complete message
   // Order: [token][senderAddress][timestamp][messageType][encryptedPayload][signature]

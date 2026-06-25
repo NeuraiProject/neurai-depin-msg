@@ -18,8 +18,8 @@ var neuraiDepinMsg = (() => {
   var __toCommonJS = (mod2) => __copyProps(__defProp({}, "__esModule", { value: true }), mod2);
 
   // src/index.js
-  var src_exports = {};
-  __export(src_exports, {
+  var index_exports = {};
+  __export(index_exports, {
     base58Decode: () => base58Decode,
     buildDepinMessage: () => buildDepinMessage,
     bytesToHex: () => bytesToHex2,
@@ -2342,8 +2342,7 @@ var neuraiDepinMsg = (() => {
 
   // src/index.js
   function writeCompactSize(value) {
-    if (value < 0)
-      throw new Error("CompactSize cannot be negative");
+    if (value < 0) throw new Error("CompactSize cannot be negative");
     if (value < 253) {
       return new Uint8Array([value]);
     } else if (value <= 65535) {
@@ -2409,8 +2408,7 @@ var neuraiDepinMsg = (() => {
     return result;
   }
   function hexToBytes2(hex) {
-    if (hex.length % 2 !== 0)
-      throw new Error("Hex must have even length");
+    if (hex.length % 2 !== 0) throw new Error("Hex must have even length");
     const bytes = new Uint8Array(hex.length / 2);
     for (let i = 0; i < hex.length; i += 2) {
       bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
@@ -2421,38 +2419,29 @@ var neuraiDepinMsg = (() => {
     return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
   function normalizeHex(hex) {
-    if (typeof hex !== "string")
-      return null;
+    if (typeof hex !== "string") return null;
     const trimmed = hex.trim().toLowerCase();
     const noPrefix = trimmed.startsWith("0x") ? trimmed.slice(2) : trimmed;
-    if (noPrefix.length === 0)
-      return null;
-    if (!/^[0-9a-f]+$/.test(noPrefix))
-      return null;
-    if (noPrefix.length % 2 !== 0)
-      return null;
+    if (noPrefix.length === 0) return null;
+    if (!/^[0-9a-f]+$/.test(noPrefix)) return null;
+    if (noPrefix.length % 2 !== 0) return null;
     return noPrefix;
   }
   function readCompactSize(buf, offset) {
-    if (offset >= buf.length)
-      throw new Error("CompactSize: out of bounds");
+    if (offset >= buf.length) throw new Error("CompactSize: out of bounds");
     const first = buf[offset];
-    if (first < 253)
-      return { value: first, offset: offset + 1 };
+    if (first < 253) return { value: first, offset: offset + 1 };
     if (first === 253) {
-      if (offset + 3 > buf.length)
-        throw new Error("CompactSize: truncated uint16");
+      if (offset + 3 > buf.length) throw new Error("CompactSize: truncated uint16");
       const value2 = buf[offset + 1] | buf[offset + 2] << 8;
       return { value: value2, offset: offset + 3 };
     }
     if (first === 254) {
-      if (offset + 5 > buf.length)
-        throw new Error("CompactSize: truncated uint32");
+      if (offset + 5 > buf.length) throw new Error("CompactSize: truncated uint32");
       const value2 = buf[offset + 1] | buf[offset + 2] << 8 | buf[offset + 3] << 16 | buf[offset + 4] << 24;
       return { value: value2 >>> 0, offset: offset + 5 };
     }
-    if (offset + 9 > buf.length)
-      throw new Error("CompactSize: truncated uint64");
+    if (offset + 9 > buf.length) throw new Error("CompactSize: truncated uint64");
     let value = 0n;
     for (let i = 0; i < 8; i++) {
       value |= BigInt(buf[offset + 1 + i]) << 8n * BigInt(i);
@@ -2464,14 +2453,12 @@ var neuraiDepinMsg = (() => {
   }
   function readVector(buf, offset) {
     const { value: len, offset: afterLen } = readCompactSize(buf, offset);
-    if (afterLen + len > buf.length)
-      throw new Error("Vector: truncated");
+    if (afterLen + len > buf.length) throw new Error("Vector: truncated");
     const data = buf.slice(afterLen, afterLen + len);
     return { data, offset: afterLen + len };
   }
   function deserializeEciesMessage(serialized) {
-    if (!(serialized instanceof Uint8Array))
-      throw new Error("deserializeEciesMessage: invalid input");
+    if (!(serialized instanceof Uint8Array)) throw new Error("deserializeEciesMessage: invalid input");
     let offset = 0;
     const ephem = readVector(serialized, offset);
     const ephemeralPubKey = ephem.data;
@@ -2487,8 +2474,7 @@ var neuraiDepinMsg = (() => {
     offset = countRes.offset;
     const recipientKeys = /* @__PURE__ */ new Map();
     for (let i = 0; i < count; i++) {
-      if (offset + 20 > serialized.length)
-        throw new Error("recipientKeys: truncated keyid");
+      if (offset + 20 > serialized.length) throw new Error("recipientKeys: truncated keyid");
       const keyId = serialized.slice(offset, offset + 20);
       offset += 20;
       const v = readVector(serialized, offset);
@@ -2502,8 +2488,7 @@ var neuraiDepinMsg = (() => {
     const bytes = [];
     for (let i = 0; i < str.length; i++) {
       const charIndex = BASE58_ALPHABET.indexOf(str[i]);
-      if (charIndex === -1)
-        throw new Error("Invalid Base58 character: " + str[i]);
+      if (charIndex === -1) throw new Error("Invalid Base58 character: " + str[i]);
       let carry = charIndex;
       for (let j = 0; j < bytes.length; j++) {
         carry += bytes[j] * 58;
@@ -2659,10 +2644,8 @@ var neuraiDepinMsg = (() => {
     return bytes;
   }
   async function aes256GcmEncrypt(plaintext, key, nonce) {
-    if (key.length !== 32)
-      throw new Error("Key must be 32 bytes");
-    if (nonce.length !== 12)
-      throw new Error("Nonce must be 12 bytes");
+    if (key.length !== 32) throw new Error("Key must be 32 bytes");
+    if (nonce.length !== 12) throw new Error("Nonce must be 12 bytes");
     const cryptoKey = await crypto.subtle.importKey(
       "raw",
       key,
@@ -2681,12 +2664,9 @@ var neuraiDepinMsg = (() => {
     return { ciphertext, tag };
   }
   async function aes256GcmDecrypt(ciphertext, key, nonce, tag) {
-    if (key.length !== 32)
-      throw new Error("Key must be 32 bytes");
-    if (nonce.length !== 12)
-      throw new Error("Nonce must be 12 bytes");
-    if (tag.length !== 16)
-      throw new Error("Tag must be 16 bytes");
+    if (key.length !== 32) throw new Error("Key must be 32 bytes");
+    if (nonce.length !== 12) throw new Error("Nonce must be 12 bytes");
+    if (tag.length !== 16) throw new Error("Tag must be 16 bytes");
     const cryptoKey = await crypto.subtle.importKey(
       "raw",
       key,
@@ -2711,10 +2691,8 @@ var neuraiDepinMsg = (() => {
       return hexToBytes2(hex);
     }
     const norm = normalizeHex(wifOrHex);
-    if (!norm)
-      throw new Error("Private key must be WIF or 64-hex");
-    if (norm.length !== 64)
-      throw new Error("Private key must be 32 bytes (64 hex chars)");
+    if (!norm) throw new Error("Private key must be WIF or 64-hex");
+    if (norm.length !== 64) throw new Error("Private key must be 32 bytes (64 hex chars)");
     return hexToBytes2(norm);
   }
   async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipientPrivateKey) {
@@ -2722,8 +2700,7 @@ var neuraiDepinMsg = (() => {
       throw new Error("WebCrypto (crypto.subtle) is required for decrypt");
     }
     const normalized = normalizeHex(encryptedPayloadHex);
-    if (!normalized)
-      throw new Error("Invalid encryptedPayloadHex");
+    if (!normalized) throw new Error("Invalid encryptedPayloadHex");
     const serialized = hexToBytes2(normalized);
     const msg = deserializeEciesMessage(serialized);
     const recipientPrivKeyBytes = await normalizePrivateKeyTo32Bytes(recipientPrivateKey);
@@ -2735,10 +2712,8 @@ var neuraiDepinMsg = (() => {
     const keyIdHex = bytesToHex2(keyIdBytes);
     const keyIdHexReversed = bytesToHex2(keyIdBytes.slice().reverse());
     const recipientPackage = msg.recipientKeys.get(keyIdHex) ?? msg.recipientKeys.get(keyIdHexReversed);
-    if (!recipientPackage)
-      return null;
-    if (recipientPackage.length < 12 + 32 + 16)
-      return null;
+    if (!recipientPackage) return null;
+    if (recipientPackage.length < 12 + 32 + 16) return null;
     const recipientNonce = recipientPackage.slice(0, 12);
     const encryptedAESKey = recipientPackage.slice(12, recipientPackage.length - 16);
     const recipientTag = recipientPackage.slice(recipientPackage.length - 16);
@@ -2751,11 +2726,9 @@ var neuraiDepinMsg = (() => {
     } catch {
       return null;
     }
-    if (aesKey.length !== 32)
-      return null;
+    if (aesKey.length !== 32) return null;
     const payload = msg.encryptedPayload;
-    if (payload.length < 12 + 1 + 16)
-      return null;
+    if (payload.length < 12 + 1 + 16) return null;
     const payloadNonce = payload.slice(0, 12);
     const ciphertext = payload.slice(12, payload.length - 16);
     const payloadTag = payload.slice(payload.length - 16);
@@ -2805,14 +2778,12 @@ var neuraiDepinMsg = (() => {
     parts.push(serializeVector(msg.encryptedPayload));
     const entries = Array.from(msg.recipientKeys.entries()).map(([hash160Hex, recipientPackage]) => {
       const keyBytes = hexToBytes2(hash160Hex);
-      if (keyBytes.length !== 20)
-        throw new Error("recipient key hash160 must be 20 bytes");
+      if (keyBytes.length !== 20) throw new Error("recipient key hash160 must be 20 bytes");
       return { keyBytes, recipientPackage };
     });
     entries.sort((a, b) => {
       for (let i = 0; i < 20; i++) {
-        if (a.keyBytes[i] !== b.keyBytes[i])
-          return a.keyBytes[i] - b.keyBytes[i];
+        if (a.keyBytes[i] !== b.keyBytes[i]) return a.keyBytes[i] - b.keyBytes[i];
       }
       return 0;
     });
@@ -2824,10 +2795,8 @@ var neuraiDepinMsg = (() => {
     return concatBytes2(...parts);
   }
   async function buildDepinMessage(params) {
-    if (!params.token)
-      throw new Error("Token is required");
-    if (!params.senderAddress)
-      throw new Error("Sender address is required");
+    if (!params.token) throw new Error("Token is required");
+    if (!params.senderAddress) throw new Error("Sender address is required");
     if (!params.senderPubKey || params.senderPubKey.length !== 66) {
       throw new Error("Sender public key must be 66 hex characters");
     }
@@ -2850,8 +2819,7 @@ var neuraiDepinMsg = (() => {
     if (privateKeyHex.length !== 64) {
       throw new Error("Private key must be 64 hex characters (or WIF format)");
     }
-    if (!params.message)
-      throw new Error("Message is required");
+    if (!params.message) throw new Error("Message is required");
     if (!params.recipientPubKeys || params.recipientPubKeys.length === 0) {
       throw new Error("At least one recipient is required");
     }
@@ -2870,8 +2838,7 @@ var neuraiDepinMsg = (() => {
     const privateKey = hexToBytes2(privateKeyHex);
     const senderPubKey = hexToBytes2(params.senderPubKey);
     const recipientPubKeys = params.recipientPubKeys.map((pk) => {
-      if (pk.length !== 66)
-        throw new Error("Recipient pubkey must be 66 hex chars");
+      if (pk.length !== 66) throw new Error("Recipient pubkey must be 66 hex chars");
       return hexToBytes2(pk);
     });
     const senderHex = params.senderPubKey.toLowerCase();
@@ -2916,10 +2883,8 @@ var neuraiDepinMsg = (() => {
     }
     const normalizedMsg = normalizeHex(messageHex);
     const normalizedServerPk = normalizeHex(serverPubKeyHex);
-    if (!normalizedMsg)
-      throw new Error("Invalid messageHex");
-    if (!normalizedServerPk)
-      throw new Error("Invalid serverPubKeyHex");
+    if (!normalizedMsg) throw new Error("Invalid messageHex");
+    if (!normalizedServerPk) throw new Error("Invalid serverPubKeyHex");
     const serverPubKey = hexToBytes2(normalizedServerPk);
     if (serverPubKey.length !== 33) {
       throw new Error("Server public key must be 33 bytes compressed");
@@ -2962,7 +2927,7 @@ var neuraiDepinMsg = (() => {
       }
     };
   }
-  return __toCommonJS(src_exports);
+  return __toCommonJS(index_exports);
 })();
 /*! Bundled license information:
 
@@ -2970,20 +2935,10 @@ var neuraiDepinMsg = (() => {
   (*! noble-hashes - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
 
 @noble/curves/esm/utils.js:
-  (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
-
 @noble/curves/esm/abstract/modular.js:
-  (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
-
 @noble/curves/esm/abstract/curve.js:
-  (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
-
 @noble/curves/esm/abstract/weierstrass.js:
-  (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
-
 @noble/curves/esm/_shortw_utils.js:
-  (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
-
 @noble/curves/esm/secp256k1.js:
   (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
 */

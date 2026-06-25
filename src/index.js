@@ -6,6 +6,9 @@
  */
 
 import { secp256k1 } from '@noble/curves/secp256k1';
+import { gcm } from '@noble/ciphers/aes';
+import { sha256 as nobleSha256 } from '@noble/hashes/sha256';
+import { ripemd160 as nobleRipemd160 } from '@noble/hashes/ripemd160';
 
 // ============================================
 // SERIALIZATION UTILITIES
@@ -251,8 +254,8 @@ function isWIF(str) {
 // ============================================
 
 async function sha256(data) {
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  return new Uint8Array(hashBuffer);
+  // Pure-JS (noble) so it runs under Hermes/React Native (no crypto.subtle).
+  return nobleSha256(data);
 }
 
 async function doubleSha256(data) {
@@ -261,69 +264,9 @@ async function doubleSha256(data) {
 }
 
 function ripemd160(data) {
-  let h0 = 0x67452301, h1 = 0xefcdab89, h2 = 0x98badcfe, h3 = 0x10325476, h4 = 0xc3d2e1f0;
-
-  const K1 = [0x00000000, 0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xa953fd4e];
-  const K2 = [0x50a28be6, 0x5c4dd124, 0x6d703ef3, 0x7a6d76e9, 0x00000000];
-
-  const R1 = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,7,4,13,1,10,6,15,3,12,0,9,5,2,14,11,8,3,10,14,4,9,15,8,1,2,7,0,6,13,11,5,12,1,9,11,10,0,8,12,4,13,3,7,15,14,5,6,2,4,0,5,9,7,12,2,10,14,1,3,8,11,6,15,13];
-  const R2 = [5,14,7,0,9,2,11,4,13,6,15,8,1,10,3,12,6,11,3,7,0,13,5,10,14,15,8,12,4,9,1,2,15,5,1,3,7,14,6,9,11,8,12,2,10,0,4,13,8,6,4,1,3,11,15,0,5,12,2,13,9,7,10,14,12,15,10,4,1,5,8,7,6,2,13,14,0,3,9,11];
-  const S1 = [11,14,15,12,5,8,7,9,11,13,14,15,6,7,9,8,7,6,8,13,11,9,7,15,7,12,15,9,11,7,13,12,11,13,6,7,14,9,13,15,14,8,13,6,5,12,7,5,11,12,14,15,14,15,9,8,9,14,5,6,8,6,5,12,9,15,5,11,6,8,13,12,5,12,13,14,11,8,5,6];
-  const S2 = [8,9,9,11,13,15,15,5,7,7,8,11,14,14,12,6,9,13,15,7,12,8,9,11,7,7,12,7,6,15,13,11,9,7,15,11,8,6,6,14,12,13,5,14,13,13,7,5,15,5,8,11,14,14,6,14,6,9,12,9,12,5,15,8,8,5,12,9,12,5,14,6,8,13,6,5,15,13,11,11];
-
-  function rotl(x, n) { return ((x << n) | (x >>> (32 - n))) >>> 0; }
-
-  const bitLen = data.length * 8;
-  const padLen = (64 - ((data.length + 9) % 64)) % 64;
-  const padded = new Uint8Array(data.length + 1 + padLen + 8);
-  padded.set(data);
-  padded[data.length] = 0x80;
-  const view = new DataView(padded.buffer);
-  view.setUint32(padded.length - 8, bitLen, true);
-
-  const blocks = padded.length / 64;
-
-  for (let i = 0; i < blocks; i++) {
-    const X = new Uint32Array(16);
-    for (let j = 0; j < 16; j++) {
-      const offset = i * 64 + j * 4;
-      X[j] = padded[offset] | (padded[offset + 1] << 8) | (padded[offset + 2] << 16) | (padded[offset + 3] << 24);
-    }
-
-    let a1 = h0, b1 = h1, c1 = h2, d1 = h3, e1 = h4;
-    let a2 = h0, b2 = h1, c2 = h2, d2 = h3, e2 = h4;
-
-    for (let j = 0; j < 80; j++) {
-      const round = Math.floor(j / 16);
-      let f1, f2;
-
-      if (round === 0) { f1 = b1 ^ c1 ^ d1; f2 = b2 ^ (c2 | ~d2); }
-      else if (round === 1) { f1 = (b1 & c1) | (~b1 & d1); f2 = (b2 & d2) | (c2 & ~d2); }
-      else if (round === 2) { f1 = (b1 | ~c1) ^ d1; f2 = (b2 | ~c2) ^ d2; }
-      else if (round === 3) { f1 = (b1 & d1) | (c1 & ~d1); f2 = (b2 & c2) | (~b2 & d2); }
-      else { f1 = b1 ^ (c1 | ~d1); f2 = b2 ^ c2 ^ d2; }
-
-      const t1 = (rotl((a1 + f1 + X[R1[j]] + K1[round]) >>> 0, S1[j]) + e1) >>> 0;
-      a1 = e1; e1 = d1; d1 = rotl(c1, 10); c1 = b1; b1 = t1;
-
-      const t2 = (rotl((a2 + f2 + X[R2[j]] + K2[round]) >>> 0, S2[j]) + e2) >>> 0;
-      a2 = e2; e2 = d2; d2 = rotl(c2, 10); c2 = b2; b2 = t2;
-    }
-
-    const t = (h1 + c1 + d2) >>> 0;
-    h1 = (h2 + d1 + e2) >>> 0;
-    h2 = (h3 + e1 + a2) >>> 0;
-    h3 = (h4 + a1 + b2) >>> 0;
-    h4 = (h0 + b1 + c2) >>> 0;
-    h0 = t;
-  }
-
-  const result = new Uint8Array(20);
-  const rv = new DataView(result.buffer);
-  rv.setUint32(0, h0, true); rv.setUint32(4, h1, true);
-  rv.setUint32(8, h2, true); rv.setUint32(12, h3, true);
-  rv.setUint32(16, h4, true);
-  return result;
+  // Pure-JS (noble) so it runs under Hermes/React Native (no crypto.subtle).
+  // Byte-identical to the previous hand-rolled impl (verified via hash160 vectors).
+  return nobleRipemd160(data);
 }
 
 async function hash160(data) {
@@ -362,28 +305,8 @@ function randomBytes(length) {
   return bytes;
 }
 
-async function aes256CbcEncrypt(plaintext, key, iv) {
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw', key, { name: 'AES-CBC' }, false, ['encrypt']
-  );
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: 'AES-CBC', iv }, cryptoKey, plaintext
-  );
-  return new Uint8Array(ciphertext);
-}
-
-async function aes256CbcDecrypt(ciphertext, key, iv) {
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw', key, { name: 'AES-CBC' }, false, ['decrypt']
-  );
-  const plaintext = await crypto.subtle.decrypt(
-    { name: 'AES-CBC', iv }, cryptoKey, ciphertext
-  );
-  return new Uint8Array(plaintext);
-}
-
 /**
- * AES-256-GCM encryption
+ * AES-256-GCM encryption (noble; runs under Hermes/React Native)
  * @param {Uint8Array} plaintext
  * @param {Uint8Array} key - 32 bytes
  * @param {Uint8Array} nonce - 12 bytes
@@ -393,20 +316,10 @@ async function aes256GcmEncrypt(plaintext, key, nonce) {
   if (key.length !== 32) throw new Error('Key must be 32 bytes');
   if (nonce.length !== 12) throw new Error('Nonce must be 12 bytes');
 
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw', key, { name: 'AES-GCM' }, false, ['encrypt']
-  );
-
-  const encrypted = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: nonce, tagLength: 128 },
-    cryptoKey,
-    plaintext
-  );
-
-  const encryptedArray = new Uint8Array(encrypted);
-  // WebCrypto appends the 16-byte auth tag at the end
-  const ciphertext = encryptedArray.slice(0, -16);
-  const tag = encryptedArray.slice(-16);
+  // noble returns ciphertext||tag with a 16-byte tag at the end, same as WebCrypto.
+  const out = gcm(key, nonce).encrypt(plaintext);
+  const ciphertext = out.slice(0, -16);
+  const tag = out.slice(-16);
 
   return { ciphertext, tag };
 }
@@ -424,32 +337,8 @@ async function aes256GcmDecrypt(ciphertext, key, nonce, tag) {
   if (nonce.length !== 12) throw new Error('Nonce must be 12 bytes');
   if (tag.length !== 16) throw new Error('Tag must be 16 bytes');
 
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
-  );
-
-  // Concatenate ciphertext and tag for WebCrypto
-  const combined = concatBytes(ciphertext, tag);
-
-  const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: nonce, tagLength: 128 },
-    cryptoKey,
-    combined
-  );
-
-  return new Uint8Array(decrypted);
-}
-
-async function hmacSha256(key, data) {
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw',
-    key,
-    { name: 'HMAC', hash: { name: 'SHA-256' } },
-    false,
-    ['sign']
-  );
-  const mac = await crypto.subtle.sign('HMAC', cryptoKey, data);
-  return new Uint8Array(mac);
+  // noble throws on authentication failure, like WebCrypto's OperationError.
+  return gcm(key, nonce).decrypt(concatBytes(ciphertext, tag));
 }
 
 async function normalizePrivateKeyTo32Bytes(wifOrHex) {
@@ -475,10 +364,6 @@ async function normalizePrivateKeyTo32Bytes(wifOrHex) {
  * for the provided private key, or if authentication fails.
  */
 async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipientPrivateKey) {
-  if (!globalThis.crypto?.subtle) {
-    throw new Error('WebCrypto (crypto.subtle) is required for decrypt');
-  }
-
   const normalized = normalizeHex(encryptedPayloadHex);
   if (!normalized) throw new Error('Invalid encryptedPayloadHex');
 

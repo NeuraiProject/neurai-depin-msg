@@ -61,13 +61,12 @@ neurai-cli depinsubmitmsg "<HEX_FROM_LIBRARY>"
 ## Usage (Node.js)
 
 The published build is browser-style (IIFE) and attaches to `globalThis.neuraiDepinMsg`.
-Node must have WebCrypto available.
+All cryptography is pure-JS ([noble](https://paulmillr.com/noble/)), so it runs in
+the browser, Node and React Native/Hermes with no `crypto.subtle` requirement. The
+only host dependency is a secure RNG (`crypto.getRandomValues`) **when encrypting**
+— see [Environments](#environments) below.
 
 ```js
-// Node 18+ usually has WebCrypto; if not, enable it explicitly:
-import { webcrypto } from 'node:crypto';
-if (!globalThis.crypto?.subtle) globalThis.crypto = webcrypto;
-
 // This executes the IIFE bundle and sets globalThis.neuraiDepinMsg
 import '@neuraiproject/neurai-depin-msg/dist/neurai-depin-msg.js';
 
@@ -179,6 +178,26 @@ Open `demo.html` in a browser (a local server is recommended):
 python3 -m http.server 8080
 # Open http://localhost:8080/demo.html
 ```
+
+## Environments
+
+All cryptography is pure-JS ([`@noble/curves`](https://github.com/paulmillr/noble-curves),
+[`@noble/ciphers`](https://github.com/paulmillr/noble-ciphers),
+[`@noble/hashes`](https://github.com/paulmillr/noble-hashes)) — **no `crypto.subtle`
+(WebCrypto) needed**. Works in the browser, Node and React Native/Hermes.
+
+The only host requirement is a secure random source, `crypto.getRandomValues`, used
+to generate the ephemeral key and nonces **when encrypting**:
+
+- **Browser / Node 18+**: available natively, nothing to do.
+- **React Native / Hermes**: `crypto.getRandomValues` is **not** built in. Add the
+  polyfill once, at your app entry point, before using the library:
+
+  ```js
+  import 'react-native-get-random-values';   // must run before buildDepinMessage()
+  ```
+
+**Decryption** (`decryptDepinReceiveEncryptedPayload`) needs no RNG and no polyfill.
 
 ## Development
 

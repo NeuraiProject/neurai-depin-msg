@@ -28,7 +28,7 @@ var neuraiDepinMsg = (() => {
     hash160: () => hash160,
     hexToBytes: () => hexToBytes2,
     isWIF: () => isWIF,
-    sha256: () => sha2562,
+    sha256: () => sha2563,
     unwrapMessageFromServer: () => unwrapMessageFromServer,
     wifToHex: () => wifToHex,
     wrapMessageForServer: () => wrapMessageForServer
@@ -80,6 +80,9 @@ var neuraiDepinMsg = (() => {
   }
   function rotr(word, shift) {
     return word << 32 - shift | word >>> shift;
+  }
+  function rotl(word, shift) {
+    return word << shift | word >>> 32 - shift >>> 0;
   }
   var hasHexBuiltin = /* @__PURE__ */ (() => (
     // @ts-ignore
@@ -174,17 +177,17 @@ var neuraiDepinMsg = (() => {
   }
 
   // node_modules/@noble/hashes/esm/_md.js
-  function setBigUint64(view, byteOffset, value, isLE) {
+  function setBigUint64(view, byteOffset, value, isLE2) {
     if (typeof view.setBigUint64 === "function")
-      return view.setBigUint64(byteOffset, value, isLE);
+      return view.setBigUint64(byteOffset, value, isLE2);
     const _32n = BigInt(32);
     const _u32_max = BigInt(4294967295);
     const wh = Number(value >> _32n & _u32_max);
     const wl = Number(value & _u32_max);
-    const h = isLE ? 4 : 0;
-    const l = isLE ? 0 : 4;
-    view.setUint32(byteOffset + h, wh, isLE);
-    view.setUint32(byteOffset + l, wl, isLE);
+    const h = isLE2 ? 4 : 0;
+    const l = isLE2 ? 0 : 4;
+    view.setUint32(byteOffset + h, wh, isLE2);
+    view.setUint32(byteOffset + l, wl, isLE2);
   }
   function Chi(a, b, c) {
     return a & b ^ ~a & c;
@@ -193,7 +196,7 @@ var neuraiDepinMsg = (() => {
     return a & b ^ a & c ^ b & c;
   }
   var HashMD = class extends Hash {
-    constructor(blockLen, outputLen, padOffset, isLE) {
+    constructor(blockLen, outputLen, padOffset, isLE2) {
       super();
       this.finished = false;
       this.length = 0;
@@ -202,7 +205,7 @@ var neuraiDepinMsg = (() => {
       this.blockLen = blockLen;
       this.outputLen = outputLen;
       this.padOffset = padOffset;
-      this.isLE = isLE;
+      this.isLE = isLE2;
       this.buffer = new Uint8Array(blockLen);
       this.view = createView(this.buffer);
     }
@@ -236,7 +239,7 @@ var neuraiDepinMsg = (() => {
       aexists(this);
       aoutput(out, this);
       this.finished = true;
-      const { buffer, view, blockLen, isLE } = this;
+      const { buffer, view, blockLen, isLE: isLE2 } = this;
       let { pos } = this;
       buffer[pos++] = 128;
       clean(this.buffer.subarray(pos));
@@ -246,7 +249,7 @@ var neuraiDepinMsg = (() => {
       }
       for (let i = pos; i < blockLen; i++)
         buffer[i] = 0;
-      setBigUint64(view, blockLen - 8, BigInt(this.length * 8), isLE);
+      setBigUint64(view, blockLen - 8, BigInt(this.length * 8), isLE2);
       this.process(view, 0);
       const oview = createView(out);
       const len = this.outputLen;
@@ -257,7 +260,7 @@ var neuraiDepinMsg = (() => {
       if (outLen > state.length)
         throw new Error("_sha2: outputLen bigger than state");
       for (let i = 0; i < outLen; i++)
-        oview.setUint32(4 * i, state[i], isLE);
+        oview.setUint32(4 * i, state[i], isLE2);
     }
     digest() {
       const { buffer, outputLen } = this;
@@ -881,7 +884,7 @@ var neuraiDepinMsg = (() => {
     const nByteLength = Math.ceil(_nBitLength / 8);
     return { nBitLength: _nBitLength, nByteLength };
   }
-  function Field(ORDER, bitLenOrOpts, isLE = false, opts = {}) {
+  function Field(ORDER, bitLenOrOpts, isLE2 = false, opts = {}) {
     if (ORDER <= _0n2)
       throw new Error("invalid field: expected ORDER > 0, got " + ORDER);
     let _nbitLength = void 0;
@@ -889,7 +892,7 @@ var neuraiDepinMsg = (() => {
     let modFromBytes = false;
     let allowedLengths = void 0;
     if (typeof bitLenOrOpts === "object" && bitLenOrOpts != null) {
-      if (opts.sqrt || isLE)
+      if (opts.sqrt || isLE2)
         throw new Error("cannot specify opts in two arguments");
       const _opts = bitLenOrOpts;
       if (_opts.BITS)
@@ -897,7 +900,7 @@ var neuraiDepinMsg = (() => {
       if (_opts.sqrt)
         _sqrt = _opts.sqrt;
       if (typeof _opts.isLE === "boolean")
-        isLE = _opts.isLE;
+        isLE2 = _opts.isLE;
       if (typeof _opts.modFromBytes === "boolean")
         modFromBytes = _opts.modFromBytes;
       allowedLengths = _opts.allowedLengths;
@@ -913,7 +916,7 @@ var neuraiDepinMsg = (() => {
     let sqrtP;
     const f = Object.freeze({
       ORDER,
-      isLE,
+      isLE: isLE2,
       BITS,
       BYTES,
       MASK: bitMask(BITS),
@@ -949,19 +952,19 @@ var neuraiDepinMsg = (() => {
           sqrtP = FpSqrt(ORDER);
         return sqrtP(f, n);
       }),
-      toBytes: (num) => isLE ? numberToBytesLE(num, BYTES) : numberToBytesBE(num, BYTES),
+      toBytes: (num) => isLE2 ? numberToBytesLE(num, BYTES) : numberToBytesBE(num, BYTES),
       fromBytes: (bytes, skipValidation = true) => {
         if (allowedLengths) {
           if (!allowedLengths.includes(bytes.length) || bytes.length > BYTES) {
             throw new Error("Field.fromBytes: expected " + allowedLengths + " bytes, got " + bytes.length);
           }
           const padded = new Uint8Array(BYTES);
-          padded.set(bytes, isLE ? 0 : padded.length - bytes.length);
+          padded.set(bytes, isLE2 ? 0 : padded.length - bytes.length);
           bytes = padded;
         }
         if (bytes.length !== BYTES)
           throw new Error("Field.fromBytes: expected " + BYTES + " bytes, got " + bytes.length);
-        let scalar = isLE ? bytesToNumberLE(bytes) : bytesToNumberBE(bytes);
+        let scalar = isLE2 ? bytesToNumberLE(bytes) : bytesToNumberBE(bytes);
         if (modFromBytes)
           scalar = mod(scalar, ORDER);
         if (!skipValidation) {
@@ -988,15 +991,15 @@ var neuraiDepinMsg = (() => {
     const length = getFieldBytesLength(fieldOrder);
     return length + Math.ceil(length / 2);
   }
-  function mapHashToField(key, fieldOrder, isLE = false) {
+  function mapHashToField(key, fieldOrder, isLE2 = false) {
     const len = key.length;
     const fieldLen = getFieldBytesLength(fieldOrder);
     const minLen = getMinHashLength(fieldOrder);
     if (len < 16 || len < minLen || len > 1024)
       throw new Error("expected " + minLen + "-1024 bytes of input, got " + len);
-    const num = isLE ? bytesToNumberLE(key) : bytesToNumberBE(key);
+    const num = isLE2 ? bytesToNumberLE(key) : bytesToNumberBE(key);
     const reduced = mod(num, fieldOrder - _1n2) + _1n2;
-    return isLE ? numberToBytesLE(reduced, fieldLen) : numberToBytesBE(reduced, fieldLen);
+    return isLE2 ? numberToBytesLE(reduced, fieldLen) : numberToBytesBE(reduced, fieldLen);
   }
 
   // node_modules/@noble/curves/esm/abstract/curve.js
@@ -1245,14 +1248,14 @@ var neuraiDepinMsg = (() => {
     }
     return sum;
   }
-  function createField(order, field, isLE) {
+  function createField(order, field, isLE2) {
     if (field) {
       if (field.ORDER !== order)
         throw new Error("Field.ORDER must match order: Fp == p, Fn == n");
       validateField(field);
       return field;
     } else {
-      return Field(order, { isLE });
+      return Field(order, { isLE: isLE2 });
     }
   }
   function _createCurveFields(type, CURVE, curveOpts = {}, FpFnLE) {
@@ -1768,15 +1771,15 @@ var neuraiDepinMsg = (() => {
         if (!Fn.isValidNot0(scalar))
           throw new Error("invalid scalar: out of range");
         let point, fake;
-        const mul = (n) => wnaf.cached(this, n, (p) => normalizeZ(Point, p));
+        const mul3 = (n) => wnaf.cached(this, n, (p) => normalizeZ(Point, p));
         if (endo2) {
           const { k1neg, k1, k2neg, k2 } = splitEndoScalarN(scalar);
-          const { p: k1p, f: k1f } = mul(k1);
-          const { p: k2p, f: k2f } = mul(k2);
+          const { p: k1p, f: k1f } = mul3(k1);
+          const { p: k2p, f: k2f } = mul3(k2);
           fake = k1f.add(k2f);
           point = finishEndo(endo2.beta, k1p, k2p, k1neg, k2neg);
         } else {
-          const { p, f } = mul(scalar);
+          const { p, f } = mul3(scalar);
           point = p;
           fake = f;
         }
@@ -2340,6 +2343,683 @@ var neuraiDepinMsg = (() => {
   var Fpk1 = Field(secp256k1_CURVE.p, { sqrt: sqrtMod });
   var secp256k1 = createCurve({ ...secp256k1_CURVE, Fp: Fpk1, lowS: true, endo: secp256k1_ENDO }, sha256);
 
+  // node_modules/@noble/ciphers/esm/utils.js
+  function isBytes2(a) {
+    return a instanceof Uint8Array || ArrayBuffer.isView(a) && a.constructor.name === "Uint8Array";
+  }
+  function abool(b) {
+    if (typeof b !== "boolean")
+      throw new Error(`boolean expected, not ${b}`);
+  }
+  function abytes2(b, ...lengths) {
+    if (!isBytes2(b))
+      throw new Error("Uint8Array expected");
+    if (lengths.length > 0 && !lengths.includes(b.length))
+      throw new Error("Uint8Array expected of length " + lengths + ", got length=" + b.length);
+  }
+  function aexists2(instance, checkFinished = true) {
+    if (instance.destroyed)
+      throw new Error("Hash instance has been destroyed");
+    if (checkFinished && instance.finished)
+      throw new Error("Hash#digest() has already been called");
+  }
+  function aoutput2(out, instance) {
+    abytes2(out);
+    const min = instance.outputLen;
+    if (out.length < min) {
+      throw new Error("digestInto() expects output buffer of length at least " + min);
+    }
+  }
+  function u8(arr) {
+    return new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
+  }
+  function u32(arr) {
+    return new Uint32Array(arr.buffer, arr.byteOffset, Math.floor(arr.byteLength / 4));
+  }
+  function clean2(...arrays) {
+    for (let i = 0; i < arrays.length; i++) {
+      arrays[i].fill(0);
+    }
+  }
+  function createView2(arr) {
+    return new DataView(arr.buffer, arr.byteOffset, arr.byteLength);
+  }
+  var isLE = /* @__PURE__ */ (() => new Uint8Array(new Uint32Array([287454020]).buffer)[0] === 68)();
+  function utf8ToBytes2(str) {
+    if (typeof str !== "string")
+      throw new Error("string expected");
+    return new Uint8Array(new TextEncoder().encode(str));
+  }
+  function toBytes2(data) {
+    if (typeof data === "string")
+      data = utf8ToBytes2(data);
+    else if (isBytes2(data))
+      data = copyBytes(data);
+    else
+      throw new Error("Uint8Array expected, got " + typeof data);
+    return data;
+  }
+  function equalBytes(a, b) {
+    if (a.length !== b.length)
+      return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++)
+      diff |= a[i] ^ b[i];
+    return diff === 0;
+  }
+  var wrapCipher = /* @__NO_SIDE_EFFECTS__ */ (params, constructor) => {
+    function wrappedCipher(key, ...args) {
+      abytes2(key);
+      if (!isLE)
+        throw new Error("Non little-endian hardware is not yet supported");
+      if (params.nonceLength !== void 0) {
+        const nonce = args[0];
+        if (!nonce)
+          throw new Error("nonce / iv required");
+        if (params.varSizeNonce)
+          abytes2(nonce);
+        else
+          abytes2(nonce, params.nonceLength);
+      }
+      const tagl = params.tagLength;
+      if (tagl && args[1] !== void 0) {
+        abytes2(args[1]);
+      }
+      const cipher = constructor(key, ...args);
+      const checkOutput = (fnLength, output) => {
+        if (output !== void 0) {
+          if (fnLength !== 2)
+            throw new Error("cipher output not supported");
+          abytes2(output);
+        }
+      };
+      let called = false;
+      const wrCipher = {
+        encrypt(data, output) {
+          if (called)
+            throw new Error("cannot encrypt() twice with same key + nonce");
+          called = true;
+          abytes2(data);
+          checkOutput(cipher.encrypt.length, output);
+          return cipher.encrypt(data, output);
+        },
+        decrypt(data, output) {
+          abytes2(data);
+          if (tagl && data.length < tagl)
+            throw new Error("invalid ciphertext length: smaller than tagLength=" + tagl);
+          checkOutput(cipher.decrypt.length, output);
+          return cipher.decrypt(data, output);
+        }
+      };
+      return wrCipher;
+    }
+    Object.assign(wrappedCipher, params);
+    return wrappedCipher;
+  };
+  function getOutput(expectedLength, out, onlyAligned = true) {
+    if (out === void 0)
+      return new Uint8Array(expectedLength);
+    if (out.length !== expectedLength)
+      throw new Error("invalid output length, expected " + expectedLength + ", got: " + out.length);
+    if (onlyAligned && !isAligned32(out))
+      throw new Error("invalid output, must be aligned");
+    return out;
+  }
+  function setBigUint642(view, byteOffset, value, isLE2) {
+    if (typeof view.setBigUint64 === "function")
+      return view.setBigUint64(byteOffset, value, isLE2);
+    const _32n = BigInt(32);
+    const _u32_max = BigInt(4294967295);
+    const wh = Number(value >> _32n & _u32_max);
+    const wl = Number(value & _u32_max);
+    const h = isLE2 ? 4 : 0;
+    const l = isLE2 ? 0 : 4;
+    view.setUint32(byteOffset + h, wh, isLE2);
+    view.setUint32(byteOffset + l, wl, isLE2);
+  }
+  function u64Lengths(dataLength, aadLength, isLE2) {
+    abool(isLE2);
+    const num = new Uint8Array(16);
+    const view = createView2(num);
+    setBigUint642(view, 0, BigInt(aadLength), isLE2);
+    setBigUint642(view, 8, BigInt(dataLength), isLE2);
+    return num;
+  }
+  function isAligned32(bytes) {
+    return bytes.byteOffset % 4 === 0;
+  }
+  function copyBytes(bytes) {
+    return Uint8Array.from(bytes);
+  }
+
+  // node_modules/@noble/ciphers/esm/_polyval.js
+  var BLOCK_SIZE = 16;
+  var ZEROS16 = /* @__PURE__ */ new Uint8Array(16);
+  var ZEROS32 = u32(ZEROS16);
+  var POLY = 225;
+  var mul2 = (s0, s1, s2, s3) => {
+    const hiBit = s3 & 1;
+    return {
+      s3: s2 << 31 | s3 >>> 1,
+      s2: s1 << 31 | s2 >>> 1,
+      s1: s0 << 31 | s1 >>> 1,
+      s0: s0 >>> 1 ^ POLY << 24 & -(hiBit & 1)
+      // reduce % poly
+    };
+  };
+  var swapLE = (n) => (n >>> 0 & 255) << 24 | (n >>> 8 & 255) << 16 | (n >>> 16 & 255) << 8 | n >>> 24 & 255 | 0;
+  function _toGHASHKey(k) {
+    k.reverse();
+    const hiBit = k[15] & 1;
+    let carry = 0;
+    for (let i = 0; i < k.length; i++) {
+      const t = k[i];
+      k[i] = t >>> 1 | carry;
+      carry = (t & 1) << 7;
+    }
+    k[0] ^= -hiBit & 225;
+    return k;
+  }
+  var estimateWindow = (bytes) => {
+    if (bytes > 64 * 1024)
+      return 8;
+    if (bytes > 1024)
+      return 4;
+    return 2;
+  };
+  var GHASH = class {
+    // We select bits per window adaptively based on expectedLength
+    constructor(key, expectedLength) {
+      this.blockLen = BLOCK_SIZE;
+      this.outputLen = BLOCK_SIZE;
+      this.s0 = 0;
+      this.s1 = 0;
+      this.s2 = 0;
+      this.s3 = 0;
+      this.finished = false;
+      key = toBytes2(key);
+      abytes2(key, 16);
+      const kView = createView2(key);
+      let k0 = kView.getUint32(0, false);
+      let k1 = kView.getUint32(4, false);
+      let k2 = kView.getUint32(8, false);
+      let k3 = kView.getUint32(12, false);
+      const doubles = [];
+      for (let i = 0; i < 128; i++) {
+        doubles.push({ s0: swapLE(k0), s1: swapLE(k1), s2: swapLE(k2), s3: swapLE(k3) });
+        ({ s0: k0, s1: k1, s2: k2, s3: k3 } = mul2(k0, k1, k2, k3));
+      }
+      const W = estimateWindow(expectedLength || 1024);
+      if (![1, 2, 4, 8].includes(W))
+        throw new Error("ghash: invalid window size, expected 2, 4 or 8");
+      this.W = W;
+      const bits = 128;
+      const windows = bits / W;
+      const windowSize = this.windowSize = 2 ** W;
+      const items = [];
+      for (let w = 0; w < windows; w++) {
+        for (let byte = 0; byte < windowSize; byte++) {
+          let s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+          for (let j = 0; j < W; j++) {
+            const bit = byte >>> W - j - 1 & 1;
+            if (!bit)
+              continue;
+            const { s0: d0, s1: d1, s2: d2, s3: d3 } = doubles[W * w + j];
+            s0 ^= d0, s1 ^= d1, s2 ^= d2, s3 ^= d3;
+          }
+          items.push({ s0, s1, s2, s3 });
+        }
+      }
+      this.t = items;
+    }
+    _updateBlock(s0, s1, s2, s3) {
+      s0 ^= this.s0, s1 ^= this.s1, s2 ^= this.s2, s3 ^= this.s3;
+      const { W, t, windowSize } = this;
+      let o0 = 0, o1 = 0, o2 = 0, o3 = 0;
+      const mask = (1 << W) - 1;
+      let w = 0;
+      for (const num of [s0, s1, s2, s3]) {
+        for (let bytePos = 0; bytePos < 4; bytePos++) {
+          const byte = num >>> 8 * bytePos & 255;
+          for (let bitPos = 8 / W - 1; bitPos >= 0; bitPos--) {
+            const bit = byte >>> W * bitPos & mask;
+            const { s0: e0, s1: e1, s2: e2, s3: e3 } = t[w * windowSize + bit];
+            o0 ^= e0, o1 ^= e1, o2 ^= e2, o3 ^= e3;
+            w += 1;
+          }
+        }
+      }
+      this.s0 = o0;
+      this.s1 = o1;
+      this.s2 = o2;
+      this.s3 = o3;
+    }
+    update(data) {
+      aexists2(this);
+      data = toBytes2(data);
+      abytes2(data);
+      const b32 = u32(data);
+      const blocks = Math.floor(data.length / BLOCK_SIZE);
+      const left = data.length % BLOCK_SIZE;
+      for (let i = 0; i < blocks; i++) {
+        this._updateBlock(b32[i * 4 + 0], b32[i * 4 + 1], b32[i * 4 + 2], b32[i * 4 + 3]);
+      }
+      if (left) {
+        ZEROS16.set(data.subarray(blocks * BLOCK_SIZE));
+        this._updateBlock(ZEROS32[0], ZEROS32[1], ZEROS32[2], ZEROS32[3]);
+        clean2(ZEROS32);
+      }
+      return this;
+    }
+    destroy() {
+      const { t } = this;
+      for (const elm of t) {
+        elm.s0 = 0, elm.s1 = 0, elm.s2 = 0, elm.s3 = 0;
+      }
+    }
+    digestInto(out) {
+      aexists2(this);
+      aoutput2(out, this);
+      this.finished = true;
+      const { s0, s1, s2, s3 } = this;
+      const o32 = u32(out);
+      o32[0] = s0;
+      o32[1] = s1;
+      o32[2] = s2;
+      o32[3] = s3;
+      return out;
+    }
+    digest() {
+      const res = new Uint8Array(BLOCK_SIZE);
+      this.digestInto(res);
+      this.destroy();
+      return res;
+    }
+  };
+  var Polyval = class extends GHASH {
+    constructor(key, expectedLength) {
+      key = toBytes2(key);
+      abytes2(key);
+      const ghKey = _toGHASHKey(copyBytes(key));
+      super(ghKey, expectedLength);
+      clean2(ghKey);
+    }
+    update(data) {
+      data = toBytes2(data);
+      aexists2(this);
+      const b32 = u32(data);
+      const left = data.length % BLOCK_SIZE;
+      const blocks = Math.floor(data.length / BLOCK_SIZE);
+      for (let i = 0; i < blocks; i++) {
+        this._updateBlock(swapLE(b32[i * 4 + 3]), swapLE(b32[i * 4 + 2]), swapLE(b32[i * 4 + 1]), swapLE(b32[i * 4 + 0]));
+      }
+      if (left) {
+        ZEROS16.set(data.subarray(blocks * BLOCK_SIZE));
+        this._updateBlock(swapLE(ZEROS32[3]), swapLE(ZEROS32[2]), swapLE(ZEROS32[1]), swapLE(ZEROS32[0]));
+        clean2(ZEROS32);
+      }
+      return this;
+    }
+    digestInto(out) {
+      aexists2(this);
+      aoutput2(out, this);
+      this.finished = true;
+      const { s0, s1, s2, s3 } = this;
+      const o32 = u32(out);
+      o32[0] = s0;
+      o32[1] = s1;
+      o32[2] = s2;
+      o32[3] = s3;
+      return out.reverse();
+    }
+  };
+  function wrapConstructorWithKey(hashCons) {
+    const hashC = (msg, key) => hashCons(key, msg.length).update(toBytes2(msg)).digest();
+    const tmp = hashCons(new Uint8Array(16), 0);
+    hashC.outputLen = tmp.outputLen;
+    hashC.blockLen = tmp.blockLen;
+    hashC.create = (key, expectedLength) => hashCons(key, expectedLength);
+    return hashC;
+  }
+  var ghash = wrapConstructorWithKey((key, expectedLength) => new GHASH(key, expectedLength));
+  var polyval = wrapConstructorWithKey((key, expectedLength) => new Polyval(key, expectedLength));
+
+  // node_modules/@noble/ciphers/esm/aes.js
+  var BLOCK_SIZE2 = 16;
+  var BLOCK_SIZE32 = 4;
+  var EMPTY_BLOCK = /* @__PURE__ */ new Uint8Array(BLOCK_SIZE2);
+  var POLY2 = 283;
+  function mul22(n) {
+    return n << 1 ^ POLY2 & -(n >> 7);
+  }
+  function mul(a, b) {
+    let res = 0;
+    for (; b > 0; b >>= 1) {
+      res ^= a & -(b & 1);
+      a = mul22(a);
+    }
+    return res;
+  }
+  var sbox = /* @__PURE__ */ (() => {
+    const t = new Uint8Array(256);
+    for (let i = 0, x = 1; i < 256; i++, x ^= mul22(x))
+      t[i] = x;
+    const box = new Uint8Array(256);
+    box[0] = 99;
+    for (let i = 0; i < 255; i++) {
+      let x = t[255 - i];
+      x |= x << 8;
+      box[t[i]] = (x ^ x >> 4 ^ x >> 5 ^ x >> 6 ^ x >> 7 ^ 99) & 255;
+    }
+    clean2(t);
+    return box;
+  })();
+  var rotr32_8 = (n) => n << 24 | n >>> 8;
+  var rotl32_8 = (n) => n << 8 | n >>> 24;
+  function genTtable(sbox2, fn) {
+    if (sbox2.length !== 256)
+      throw new Error("Wrong sbox length");
+    const T0 = new Uint32Array(256).map((_, j) => fn(sbox2[j]));
+    const T1 = T0.map(rotl32_8);
+    const T2 = T1.map(rotl32_8);
+    const T3 = T2.map(rotl32_8);
+    const T01 = new Uint32Array(256 * 256);
+    const T23 = new Uint32Array(256 * 256);
+    const sbox22 = new Uint16Array(256 * 256);
+    for (let i = 0; i < 256; i++) {
+      for (let j = 0; j < 256; j++) {
+        const idx = i * 256 + j;
+        T01[idx] = T0[i] ^ T1[j];
+        T23[idx] = T2[i] ^ T3[j];
+        sbox22[idx] = sbox2[i] << 8 | sbox2[j];
+      }
+    }
+    return { sbox: sbox2, sbox2: sbox22, T0, T1, T2, T3, T01, T23 };
+  }
+  var tableEncoding = /* @__PURE__ */ genTtable(sbox, (s) => mul(s, 3) << 24 | s << 16 | s << 8 | mul(s, 2));
+  var xPowers = /* @__PURE__ */ (() => {
+    const p = new Uint8Array(16);
+    for (let i = 0, x = 1; i < 16; i++, x = mul22(x))
+      p[i] = x;
+    return p;
+  })();
+  function expandKeyLE(key) {
+    abytes2(key);
+    const len = key.length;
+    if (![16, 24, 32].includes(len))
+      throw new Error("aes: invalid key size, should be 16, 24 or 32, got " + len);
+    const { sbox2 } = tableEncoding;
+    const toClean = [];
+    if (!isAligned32(key))
+      toClean.push(key = copyBytes(key));
+    const k32 = u32(key);
+    const Nk = k32.length;
+    const subByte = (n) => applySbox(sbox2, n, n, n, n);
+    const xk = new Uint32Array(len + 28);
+    xk.set(k32);
+    for (let i = Nk; i < xk.length; i++) {
+      let t = xk[i - 1];
+      if (i % Nk === 0)
+        t = subByte(rotr32_8(t)) ^ xPowers[i / Nk - 1];
+      else if (Nk > 6 && i % Nk === 4)
+        t = subByte(t);
+      xk[i] = xk[i - Nk] ^ t;
+    }
+    clean2(...toClean);
+    return xk;
+  }
+  function apply0123(T01, T23, s0, s1, s2, s3) {
+    return T01[s0 << 8 & 65280 | s1 >>> 8 & 255] ^ T23[s2 >>> 8 & 65280 | s3 >>> 24 & 255];
+  }
+  function applySbox(sbox2, s0, s1, s2, s3) {
+    return sbox2[s0 & 255 | s1 & 65280] | sbox2[s2 >>> 16 & 255 | s3 >>> 16 & 65280] << 16;
+  }
+  function encrypt(xk, s0, s1, s2, s3) {
+    const { sbox2, T01, T23 } = tableEncoding;
+    let k = 0;
+    s0 ^= xk[k++], s1 ^= xk[k++], s2 ^= xk[k++], s3 ^= xk[k++];
+    const rounds = xk.length / 4 - 2;
+    for (let i = 0; i < rounds; i++) {
+      const t02 = xk[k++] ^ apply0123(T01, T23, s0, s1, s2, s3);
+      const t12 = xk[k++] ^ apply0123(T01, T23, s1, s2, s3, s0);
+      const t22 = xk[k++] ^ apply0123(T01, T23, s2, s3, s0, s1);
+      const t32 = xk[k++] ^ apply0123(T01, T23, s3, s0, s1, s2);
+      s0 = t02, s1 = t12, s2 = t22, s3 = t32;
+    }
+    const t0 = xk[k++] ^ applySbox(sbox2, s0, s1, s2, s3);
+    const t1 = xk[k++] ^ applySbox(sbox2, s1, s2, s3, s0);
+    const t2 = xk[k++] ^ applySbox(sbox2, s2, s3, s0, s1);
+    const t3 = xk[k++] ^ applySbox(sbox2, s3, s0, s1, s2);
+    return { s0: t0, s1: t1, s2: t2, s3: t3 };
+  }
+  function ctr32(xk, isLE2, nonce, src, dst) {
+    abytes2(nonce, BLOCK_SIZE2);
+    abytes2(src);
+    dst = getOutput(src.length, dst);
+    const ctr = nonce;
+    const c32 = u32(ctr);
+    const view = createView2(ctr);
+    const src32 = u32(src);
+    const dst32 = u32(dst);
+    const ctrPos = isLE2 ? 0 : 12;
+    const srcLen = src.length;
+    let ctrNum = view.getUint32(ctrPos, isLE2);
+    let { s0, s1, s2, s3 } = encrypt(xk, c32[0], c32[1], c32[2], c32[3]);
+    for (let i = 0; i + 4 <= src32.length; i += 4) {
+      dst32[i + 0] = src32[i + 0] ^ s0;
+      dst32[i + 1] = src32[i + 1] ^ s1;
+      dst32[i + 2] = src32[i + 2] ^ s2;
+      dst32[i + 3] = src32[i + 3] ^ s3;
+      ctrNum = ctrNum + 1 >>> 0;
+      view.setUint32(ctrPos, ctrNum, isLE2);
+      ({ s0, s1, s2, s3 } = encrypt(xk, c32[0], c32[1], c32[2], c32[3]));
+    }
+    const start = BLOCK_SIZE2 * Math.floor(src32.length / BLOCK_SIZE32);
+    if (start < srcLen) {
+      const b32 = new Uint32Array([s0, s1, s2, s3]);
+      const buf = u8(b32);
+      for (let i = start, pos = 0; i < srcLen; i++, pos++)
+        dst[i] = src[i] ^ buf[pos];
+      clean2(b32);
+    }
+    return dst;
+  }
+  function computeTag(fn, isLE2, key, data, AAD) {
+    const aadLength = AAD ? AAD.length : 0;
+    const h = fn.create(key, data.length + aadLength);
+    if (AAD)
+      h.update(AAD);
+    const num = u64Lengths(8 * data.length, 8 * aadLength, isLE2);
+    h.update(data);
+    h.update(num);
+    const res = h.digest();
+    clean2(num);
+    return res;
+  }
+  var gcm = /* @__PURE__ */ wrapCipher({ blockSize: 16, nonceLength: 12, tagLength: 16, varSizeNonce: true }, function aesgcm(key, nonce, AAD) {
+    if (nonce.length < 8)
+      throw new Error("aes/gcm: invalid nonce length");
+    const tagLength = 16;
+    function _computeTag(authKey, tagMask, data) {
+      const tag = computeTag(ghash, false, authKey, data, AAD);
+      for (let i = 0; i < tagMask.length; i++)
+        tag[i] ^= tagMask[i];
+      return tag;
+    }
+    function deriveKeys() {
+      const xk = expandKeyLE(key);
+      const authKey = EMPTY_BLOCK.slice();
+      const counter = EMPTY_BLOCK.slice();
+      ctr32(xk, false, counter, counter, authKey);
+      if (nonce.length === 12) {
+        counter.set(nonce);
+      } else {
+        const nonceLen = EMPTY_BLOCK.slice();
+        const view = createView2(nonceLen);
+        setBigUint642(view, 8, BigInt(nonce.length * 8), false);
+        const g = ghash.create(authKey).update(nonce).update(nonceLen);
+        g.digestInto(counter);
+        g.destroy();
+      }
+      const tagMask = ctr32(xk, false, counter, EMPTY_BLOCK);
+      return { xk, authKey, counter, tagMask };
+    }
+    return {
+      encrypt(plaintext) {
+        const { xk, authKey, counter, tagMask } = deriveKeys();
+        const out = new Uint8Array(plaintext.length + tagLength);
+        const toClean = [xk, authKey, counter, tagMask];
+        if (!isAligned32(plaintext))
+          toClean.push(plaintext = copyBytes(plaintext));
+        ctr32(xk, false, counter, plaintext, out.subarray(0, plaintext.length));
+        const tag = _computeTag(authKey, tagMask, out.subarray(0, out.length - tagLength));
+        toClean.push(tag);
+        out.set(tag, plaintext.length);
+        clean2(...toClean);
+        return out;
+      },
+      decrypt(ciphertext) {
+        const { xk, authKey, counter, tagMask } = deriveKeys();
+        const toClean = [xk, authKey, tagMask, counter];
+        if (!isAligned32(ciphertext))
+          toClean.push(ciphertext = copyBytes(ciphertext));
+        const data = ciphertext.subarray(0, -tagLength);
+        const passedTag = ciphertext.subarray(-tagLength);
+        const tag = _computeTag(authKey, tagMask, data);
+        toClean.push(tag);
+        if (!equalBytes(tag, passedTag))
+          throw new Error("aes/gcm: invalid ghash tag");
+        const out = ctr32(xk, false, counter, data);
+        clean2(...toClean);
+        return out;
+      }
+    };
+  });
+
+  // node_modules/@noble/hashes/esm/sha256.js
+  var sha2562 = sha256;
+
+  // node_modules/@noble/hashes/esm/legacy.js
+  var Rho160 = /* @__PURE__ */ Uint8Array.from([
+    7,
+    4,
+    13,
+    1,
+    10,
+    6,
+    15,
+    3,
+    12,
+    0,
+    9,
+    5,
+    2,
+    14,
+    11,
+    8
+  ]);
+  var Id160 = /* @__PURE__ */ (() => Uint8Array.from(new Array(16).fill(0).map((_, i) => i)))();
+  var Pi160 = /* @__PURE__ */ (() => Id160.map((i) => (9 * i + 5) % 16))();
+  var idxLR = /* @__PURE__ */ (() => {
+    const L = [Id160];
+    const R = [Pi160];
+    const res = [L, R];
+    for (let i = 0; i < 4; i++)
+      for (let j of res)
+        j.push(j[i].map((k) => Rho160[k]));
+    return res;
+  })();
+  var idxL = /* @__PURE__ */ (() => idxLR[0])();
+  var idxR = /* @__PURE__ */ (() => idxLR[1])();
+  var shifts160 = /* @__PURE__ */ [
+    [11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8],
+    [12, 13, 11, 15, 6, 9, 9, 7, 12, 15, 11, 13, 7, 8, 7, 7],
+    [13, 15, 14, 11, 7, 7, 6, 8, 13, 14, 13, 12, 5, 5, 6, 9],
+    [14, 11, 12, 14, 8, 6, 5, 5, 15, 12, 15, 14, 9, 9, 8, 6],
+    [15, 12, 13, 13, 9, 5, 8, 6, 14, 11, 12, 11, 8, 6, 5, 5]
+  ].map((i) => Uint8Array.from(i));
+  var shiftsL160 = /* @__PURE__ */ idxL.map((idx, i) => idx.map((j) => shifts160[i][j]));
+  var shiftsR160 = /* @__PURE__ */ idxR.map((idx, i) => idx.map((j) => shifts160[i][j]));
+  var Kl160 = /* @__PURE__ */ Uint32Array.from([
+    0,
+    1518500249,
+    1859775393,
+    2400959708,
+    2840853838
+  ]);
+  var Kr160 = /* @__PURE__ */ Uint32Array.from([
+    1352829926,
+    1548603684,
+    1836072691,
+    2053994217,
+    0
+  ]);
+  function ripemd_f(group, x, y, z) {
+    if (group === 0)
+      return x ^ y ^ z;
+    if (group === 1)
+      return x & y | ~x & z;
+    if (group === 2)
+      return (x | ~y) ^ z;
+    if (group === 3)
+      return x & z | y & ~z;
+    return x ^ (y | ~z);
+  }
+  var BUF_160 = /* @__PURE__ */ new Uint32Array(16);
+  var RIPEMD160 = class extends HashMD {
+    constructor() {
+      super(64, 20, 8, true);
+      this.h0 = 1732584193 | 0;
+      this.h1 = 4023233417 | 0;
+      this.h2 = 2562383102 | 0;
+      this.h3 = 271733878 | 0;
+      this.h4 = 3285377520 | 0;
+    }
+    get() {
+      const { h0, h1, h2, h3, h4 } = this;
+      return [h0, h1, h2, h3, h4];
+    }
+    set(h0, h1, h2, h3, h4) {
+      this.h0 = h0 | 0;
+      this.h1 = h1 | 0;
+      this.h2 = h2 | 0;
+      this.h3 = h3 | 0;
+      this.h4 = h4 | 0;
+    }
+    process(view, offset) {
+      for (let i = 0; i < 16; i++, offset += 4)
+        BUF_160[i] = view.getUint32(offset, true);
+      let al = this.h0 | 0, ar = al, bl = this.h1 | 0, br = bl, cl = this.h2 | 0, cr = cl, dl = this.h3 | 0, dr = dl, el = this.h4 | 0, er = el;
+      for (let group = 0; group < 5; group++) {
+        const rGroup = 4 - group;
+        const hbl = Kl160[group], hbr = Kr160[group];
+        const rl = idxL[group], rr = idxR[group];
+        const sl = shiftsL160[group], sr = shiftsR160[group];
+        for (let i = 0; i < 16; i++) {
+          const tl = rotl(al + ripemd_f(group, bl, cl, dl) + BUF_160[rl[i]] + hbl, sl[i]) + el | 0;
+          al = el, el = dl, dl = rotl(cl, 10) | 0, cl = bl, bl = tl;
+        }
+        for (let i = 0; i < 16; i++) {
+          const tr = rotl(ar + ripemd_f(rGroup, br, cr, dr) + BUF_160[rr[i]] + hbr, sr[i]) + er | 0;
+          ar = er, er = dr, dr = rotl(cr, 10) | 0, cr = br, br = tr;
+        }
+      }
+      this.set(this.h1 + cl + dr | 0, this.h2 + dl + er | 0, this.h3 + el + ar | 0, this.h4 + al + br | 0, this.h0 + bl + cr | 0);
+    }
+    roundClean() {
+      clean(BUF_160);
+    }
+    destroy() {
+      this.destroyed = true;
+      clean(this.buffer);
+      this.set(0, 0, 0, 0, 0);
+    }
+  };
+  var ripemd160 = /* @__PURE__ */ createHasher(() => new RIPEMD160());
+
+  // node_modules/@noble/hashes/esm/ripemd160.js
+  var ripemd1602 = ripemd160;
+
   // src/index.js
   function writeCompactSize(value) {
     if (value < 0) throw new Error("CompactSize cannot be negative");
@@ -2378,10 +3058,10 @@ var neuraiDepinMsg = (() => {
   function serializeString(str) {
     const encoder = new TextEncoder();
     const strBytes = encoder.encode(str);
-    return concatBytes2(writeCompactSize(strBytes.length), strBytes);
+    return concatBytes3(writeCompactSize(strBytes.length), strBytes);
   }
   function serializeVector(data) {
-    return concatBytes2(writeCompactSize(data.length), data);
+    return concatBytes3(writeCompactSize(data.length), data);
   }
   function serializeInt64(value) {
     const buf = new Uint8Array(8);
@@ -2397,7 +3077,7 @@ var neuraiDepinMsg = (() => {
     buf[7] = high >> 24 & 255;
     return buf;
   }
-  function concatBytes2(...arrays) {
+  function concatBytes3(...arrays) {
     const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
     const result = new Uint8Array(totalLength);
     let offset = 0;
@@ -2531,92 +3211,19 @@ var neuraiDepinMsg = (() => {
   function isWIF(str) {
     return /^[5KLcT][1-9A-HJ-NP-Za-km-z]{50,51}$/.test(str);
   }
-  async function sha2562(data) {
-    const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-    return new Uint8Array(hashBuffer);
+  async function sha2563(data) {
+    return sha2562(data);
   }
   async function doubleSha256(data) {
-    const first = await sha2562(data);
-    return sha2562(first);
+    const first = await sha2563(data);
+    return sha2563(first);
   }
-  function ripemd160(data) {
-    let h0 = 1732584193, h1 = 4023233417, h2 = 2562383102, h3 = 271733878, h4 = 3285377520;
-    const K1 = [0, 1518500249, 1859775393, 2400959708, 2840853838];
-    const K2 = [1352829926, 1548603684, 1836072691, 2053994217, 0];
-    const R1 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8, 3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10, 0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2, 4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6, 15, 13];
-    const R2 = [5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14, 15, 8, 12, 4, 9, 1, 2, 15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4, 1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14, 12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14, 0, 3, 9, 11];
-    const S1 = [11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7, 12, 15, 9, 11, 7, 13, 12, 11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11, 12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12, 9, 15, 5, 11, 6, 8, 13, 12, 5, 12, 13, 14, 11, 8, 5, 6];
-    const S2 = [8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7, 7, 12, 7, 6, 15, 13, 11, 9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5, 8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8, 8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6, 5, 15, 13, 11, 11];
-    function rotl(x, n) {
-      return (x << n | x >>> 32 - n) >>> 0;
-    }
-    const bitLen2 = data.length * 8;
-    const padLen = (64 - (data.length + 9) % 64) % 64;
-    const padded = new Uint8Array(data.length + 1 + padLen + 8);
-    padded.set(data);
-    padded[data.length] = 128;
-    const view = new DataView(padded.buffer);
-    view.setUint32(padded.length - 8, bitLen2, true);
-    const blocks = padded.length / 64;
-    for (let i = 0; i < blocks; i++) {
-      const X = new Uint32Array(16);
-      for (let j = 0; j < 16; j++) {
-        const offset = i * 64 + j * 4;
-        X[j] = padded[offset] | padded[offset + 1] << 8 | padded[offset + 2] << 16 | padded[offset + 3] << 24;
-      }
-      let a1 = h0, b1 = h1, c1 = h2, d1 = h3, e1 = h4;
-      let a2 = h0, b2 = h1, c2 = h2, d2 = h3, e2 = h4;
-      for (let j = 0; j < 80; j++) {
-        const round = Math.floor(j / 16);
-        let f1, f2;
-        if (round === 0) {
-          f1 = b1 ^ c1 ^ d1;
-          f2 = b2 ^ (c2 | ~d2);
-        } else if (round === 1) {
-          f1 = b1 & c1 | ~b1 & d1;
-          f2 = b2 & d2 | c2 & ~d2;
-        } else if (round === 2) {
-          f1 = (b1 | ~c1) ^ d1;
-          f2 = (b2 | ~c2) ^ d2;
-        } else if (round === 3) {
-          f1 = b1 & d1 | c1 & ~d1;
-          f2 = b2 & c2 | ~b2 & d2;
-        } else {
-          f1 = b1 ^ (c1 | ~d1);
-          f2 = b2 ^ c2 ^ d2;
-        }
-        const t1 = rotl(a1 + f1 + X[R1[j]] + K1[round] >>> 0, S1[j]) + e1 >>> 0;
-        a1 = e1;
-        e1 = d1;
-        d1 = rotl(c1, 10);
-        c1 = b1;
-        b1 = t1;
-        const t2 = rotl(a2 + f2 + X[R2[j]] + K2[round] >>> 0, S2[j]) + e2 >>> 0;
-        a2 = e2;
-        e2 = d2;
-        d2 = rotl(c2, 10);
-        c2 = b2;
-        b2 = t2;
-      }
-      const t = h1 + c1 + d2 >>> 0;
-      h1 = h2 + d1 + e2 >>> 0;
-      h2 = h3 + e1 + a2 >>> 0;
-      h3 = h4 + a1 + b2 >>> 0;
-      h4 = h0 + b1 + c2 >>> 0;
-      h0 = t;
-    }
-    const result = new Uint8Array(20);
-    const rv = new DataView(result.buffer);
-    rv.setUint32(0, h0, true);
-    rv.setUint32(4, h1, true);
-    rv.setUint32(8, h2, true);
-    rv.setUint32(12, h3, true);
-    rv.setUint32(16, h4, true);
-    return result;
+  function ripemd1603(data) {
+    return ripemd1602(data);
   }
   async function hash160(data) {
-    const sha = await sha2562(data);
-    return ripemd160(sha);
+    const sha = await sha2563(data);
+    return ripemd1603(sha);
   }
   async function kdfSha256(sharedSecret, outputLen) {
     const output = new Uint8Array(outputLen);
@@ -2628,8 +3235,8 @@ var neuraiDepinMsg = (() => {
       counterBytes[1] = counter >> 16 & 255;
       counterBytes[2] = counter >> 8 & 255;
       counterBytes[3] = counter & 255;
-      const data = concatBytes2(sharedSecret, counterBytes);
-      const hash = await sha2562(data);
+      const data = concatBytes3(sharedSecret, counterBytes);
+      const hash = await sha2563(data);
       const remaining = outputLen - offset;
       const toCopy = Math.min(remaining, 32);
       output.set(hash.slice(0, toCopy), offset);
@@ -2646,41 +3253,16 @@ var neuraiDepinMsg = (() => {
   async function aes256GcmEncrypt(plaintext, key, nonce) {
     if (key.length !== 32) throw new Error("Key must be 32 bytes");
     if (nonce.length !== 12) throw new Error("Nonce must be 12 bytes");
-    const cryptoKey = await crypto.subtle.importKey(
-      "raw",
-      key,
-      { name: "AES-GCM" },
-      false,
-      ["encrypt"]
-    );
-    const encrypted = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: nonce, tagLength: 128 },
-      cryptoKey,
-      plaintext
-    );
-    const encryptedArray = new Uint8Array(encrypted);
-    const ciphertext = encryptedArray.slice(0, -16);
-    const tag = encryptedArray.slice(-16);
+    const out = gcm(key, nonce).encrypt(plaintext);
+    const ciphertext = out.slice(0, -16);
+    const tag = out.slice(-16);
     return { ciphertext, tag };
   }
   async function aes256GcmDecrypt(ciphertext, key, nonce, tag) {
     if (key.length !== 32) throw new Error("Key must be 32 bytes");
     if (nonce.length !== 12) throw new Error("Nonce must be 12 bytes");
     if (tag.length !== 16) throw new Error("Tag must be 16 bytes");
-    const cryptoKey = await crypto.subtle.importKey(
-      "raw",
-      key,
-      { name: "AES-GCM" },
-      false,
-      ["decrypt"]
-    );
-    const combined = concatBytes2(ciphertext, tag);
-    const decrypted = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: nonce, tagLength: 128 },
-      cryptoKey,
-      combined
-    );
-    return new Uint8Array(decrypted);
+    return gcm(key, nonce).decrypt(concatBytes3(ciphertext, tag));
   }
   async function normalizePrivateKeyTo32Bytes(wifOrHex) {
     if (typeof wifOrHex !== "string" || wifOrHex.length === 0) {
@@ -2696,9 +3278,6 @@ var neuraiDepinMsg = (() => {
     return hexToBytes2(norm);
   }
   async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipientPrivateKey) {
-    if (!globalThis.crypto?.subtle) {
-      throw new Error("WebCrypto (crypto.subtle) is required for decrypt");
-    }
     const normalized = normalizeHex(encryptedPayloadHex);
     if (!normalized) throw new Error("Invalid encryptedPayloadHex");
     const serialized = hexToBytes2(normalized);
@@ -2718,7 +3297,7 @@ var neuraiDepinMsg = (() => {
     const encryptedAESKey = recipientPackage.slice(12, recipientPackage.length - 16);
     const recipientTag = recipientPackage.slice(recipientPackage.length - 16);
     const sharedPointCompressed = secp256k1.getSharedSecret(recipientPrivKeyBytes, msg.ephemeralPubKey, true);
-    const sharedSecret = await sha2562(sharedPointCompressed);
+    const sharedSecret = await sha2563(sharedPointCompressed);
     const encKey = await kdfSha256(sharedSecret, 32);
     let aesKey;
     try {
@@ -2750,18 +3329,18 @@ var neuraiDepinMsg = (() => {
     const aesKey = await kdfSha256(ephemeralPrivKey, 32);
     const nonce = randomBytes2(12);
     const { ciphertext, tag } = await aes256GcmEncrypt(plaintext, aesKey, nonce);
-    const payload = concatBytes2(nonce, ciphertext, tag);
+    const payload = concatBytes3(nonce, ciphertext, tag);
     const recipientKeys = /* @__PURE__ */ new Map();
     for (const recipientPubKey of recipientPubKeys) {
       if (!(recipientPubKey instanceof Uint8Array) || recipientPubKey.length !== 33) {
         throw new Error("Recipient pubkey must be 33 bytes compressed");
       }
       const sharedPointCompressed = secp256k1.getSharedSecret(ephemeralPrivKey, recipientPubKey, true);
-      const sharedSecret = await sha2562(sharedPointCompressed);
+      const sharedSecret = await sha2563(sharedPointCompressed);
       const encKey = await kdfSha256(sharedSecret, 32);
       const recipientNonce = randomBytes2(12);
       const { ciphertext: encryptedAESKey, tag: recipientTag } = await aes256GcmEncrypt(aesKey, encKey, recipientNonce);
-      const recipientPackage = concatBytes2(recipientNonce, encryptedAESKey, recipientTag);
+      const recipientPackage = concatBytes3(recipientNonce, encryptedAESKey, recipientTag);
       const keyHash = await hash160(recipientPubKey);
       const keyHashHex = bytesToHex2(keyHash);
       recipientKeys.set(keyHashHex, recipientPackage);
@@ -2792,7 +3371,7 @@ var neuraiDepinMsg = (() => {
       parts.push(keyBytes);
       parts.push(serializeVector(recipientPackage));
     }
-    return concatBytes2(...parts);
+    return concatBytes3(...parts);
   }
   async function buildDepinMessage(params) {
     if (!params.token) throw new Error("Token is required");
@@ -2850,7 +3429,7 @@ var neuraiDepinMsg = (() => {
     const eciesMsg = await eciesEncrypt(messageBytes, recipientPubKeys);
     const encryptedPayload = serializeEciesMessage(eciesMsg);
     const messageTypeByte = messageType === "private" ? 1 : 2;
-    const hashData = concatBytes2(
+    const hashData = concatBytes3(
       serializeString(params.token),
       serializeString(params.senderAddress),
       serializeInt64(params.timestamp),
@@ -2860,7 +3439,7 @@ var neuraiDepinMsg = (() => {
     const messageHashBytes = await doubleSha256(hashData);
     const messageHash = bytesToHex2(messageHashBytes.slice().reverse());
     const signature = secp256k1.sign(messageHashBytes, privateKey).toDERRawBytes();
-    const serialized = concatBytes2(
+    const serialized = concatBytes3(
       serializeString(params.token),
       serializeString(params.senderAddress),
       serializeInt64(params.timestamp),
@@ -2920,7 +3499,7 @@ var neuraiDepinMsg = (() => {
       utils: {
         hexToBytes: hexToBytes2,
         bytesToHex: bytesToHex2,
-        sha256: sha2562,
+        sha256: sha2563,
         doubleSha256,
         hash160,
         base58Decode
@@ -2941,4 +3520,7 @@ var neuraiDepinMsg = (() => {
 @noble/curves/esm/_shortw_utils.js:
 @noble/curves/esm/secp256k1.js:
   (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
+
+@noble/ciphers/esm/utils.js:
+  (*! noble-ciphers - MIT License (c) 2023 Paul Miller (paulmillr.com) *)
 */

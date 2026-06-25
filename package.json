@@ -1,6 +1,6 @@
 {
   "name": "@neuraiproject/neurai-depin-msg",
-  "version": "2.1.4",
+  "version": "2.2.0",
   "description": "Build and serialize DePIN encrypted messages for Neurai blockchain",
   "main": "dist/neurai-depin-msg.min.js",
   "browser": "dist/neurai-depin-msg.min.js",
@@ -28,7 +28,9 @@
   },
   "homepage": "https://github.com/neuraiproject/neurai-depin-msg#readme",
   "dependencies": {
-    "@noble/curves": "^1.9.7"
+    "@noble/ciphers": "^1.3.0",
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0"
   },
   "devDependencies": {
     "esbuild": "^0.28.0"

@@ -642,6 +642,131 @@ async function buildDepinMessage(params) {
 }
 
 /**
+ * buildDepinPreimage
+ * The signature-less half of buildDepinMessage, for external signers (hardware
+ * wallets that never expose the private key). ECIES-encrypts the message for the
+ * recipients (the sender is auto-included) and returns the `encryptedPayload`
+ * hex plus the fields needed to sign. The signer feeds token / senderAddress /
+ * timestamp / messageTypeByte / encryptedPayload to the device (`depin_sign`,
+ * which rebuilds the same preimage and signs its double-SHA256), then passes the
+ * returned DER signature to {@link assembleDepinMessage}. No private key.
+ */
+async function buildDepinPreimage(params) {
+  if (!params.token) throw new Error('Token is required');
+  if (!params.senderAddress) throw new Error('Sender address is required');
+  if (!params.senderPubKey || params.senderPubKey.length !== 66) {
+    throw new Error('Sender public key must be 66 hex characters');
+  }
+  if (!params.messageType) throw new Error('messageType is required');
+  const messageType = params.messageType;
+  if (messageType !== 'private' && messageType !== 'group') {
+    throw new Error('messageType must be "private" or "group"');
+  }
+  if (!params.message) throw new Error('Message is required');
+  if (!params.recipientPubKeys || params.recipientPubKeys.length === 0) {
+    throw new Error('At least one recipient is required');
+  }
+  if (messageType === 'private') {
+    const senderHex = params.senderPubKey.toLowerCase();
+    const uniqueRecipients = new Set(
+      params.recipientPubKeys.map(pk => pk.toLowerCase()).concat(senderHex)
+    );
+    if (uniqueRecipients.size > 2) {
+      throw new Error('messageType "private" allows only one recipient plus the sender');
+    }
+  }
+  if (!params.timestamp || params.timestamp <= 0) {
+    throw new Error('Timestamp must be positive');
+  }
+
+  const senderPubKey = hexToBytes(params.senderPubKey);
+  const recipientPubKeys = params.recipientPubKeys.map(pk => {
+    if (pk.length !== 66) throw new Error('Recipient pubkey must be 66 hex chars');
+    return hexToBytes(pk);
+  });
+  // Include sender so they can decrypt their own messages (matches buildDepinMessage).
+  const senderHex = params.senderPubKey.toLowerCase();
+  if (!params.recipientPubKeys.some(pk => pk.toLowerCase() === senderHex)) {
+    recipientPubKeys.push(senderPubKey);
+  }
+
+  const encoder = new TextEncoder();
+  const messageBytes = encoder.encode(params.message);
+  const eciesMsg = await eciesEncrypt(messageBytes, recipientPubKeys);
+  const encryptedPayload = serializeEciesMessage(eciesMsg);
+  const messageTypeByte = messageType === 'private' ? 0x01 : 0x02;
+
+  return {
+    encryptedPayloadHex: bytesToHex(encryptedPayload),
+    messageType,
+    messageTypeByte,
+    encryptedSize: encryptedPayload.length,
+    recipientCount: recipientPubKeys.length
+  };
+}
+
+/**
+ * assembleDepinMessage
+ * The finalization half of buildDepinMessage: given the fields and the
+ * `encryptedPayload` produced by {@link buildDepinPreimage} plus the DER
+ * signature returned by an external signer, serializes the complete
+ * CDepinMessage (identical wire format to buildDepinMessage) ready for
+ * `depinsubmitmsg`. Accepts the signature as hex or bytes; a raw 64-byte
+ * (r||s) signature is DER-encoded automatically.
+ */
+async function assembleDepinMessage(params, signatureHexOrBytes) {
+  if (!params.token) throw new Error('Token is required');
+  if (!params.senderAddress) throw new Error('Sender address is required');
+  if (!params.encryptedPayloadHex) throw new Error('encryptedPayloadHex is required');
+  if (!params.messageType || (params.messageType !== 'private' && params.messageType !== 'group')) {
+    throw new Error('messageType must be "private" or "group"');
+  }
+  if (!params.timestamp || params.timestamp <= 0) throw new Error('Timestamp must be positive');
+  if (!signatureHexOrBytes) throw new Error('signature is required');
+
+  const normalizedPayload = normalizeHex(params.encryptedPayloadHex);
+  if (!normalizedPayload) throw new Error('Invalid encryptedPayloadHex');
+  const encryptedPayload = hexToBytes(normalizedPayload);
+  const messageTypeByte = params.messageType === 'private' ? 0x01 : 0x02;
+
+  let signature =
+    typeof signatureHexOrBytes === 'string'
+      ? hexToBytes(normalizeHex(signatureHexOrBytes))
+      : signatureHexOrBytes;
+  // A raw compact (r||s) signature -> DER, matching buildDepinMessage's DER form.
+  if (signature.length === 64) {
+    signature = secp256k1.Signature.fromCompact(signature).toDERRawBytes();
+  }
+
+  const hashData = concatBytes(
+    serializeString(params.token),
+    serializeString(params.senderAddress),
+    serializeInt64(params.timestamp),
+    new Uint8Array([messageTypeByte]),
+    serializeVector(encryptedPayload)
+  );
+  const messageHashBytes = await doubleSha256(hashData);
+  const messageHash = bytesToHex(messageHashBytes.slice().reverse());
+
+  const serialized = concatBytes(
+    serializeString(params.token),
+    serializeString(params.senderAddress),
+    serializeInt64(params.timestamp),
+    new Uint8Array([messageTypeByte]),
+    serializeVector(encryptedPayload),
+    serializeVector(signature)
+  );
+
+  return {
+    hex: bytesToHex(serialized),
+    messageHash,
+    messageHashBytes: bytesToHex(messageHashBytes),
+    encryptedSize: encryptedPayload.length,
+    messageType: params.messageType
+  };
+}
+
+/**
  * wrapMessageForServer
  * Encrypts a serialized CDepinMessage hex for the server's public key.
  */
@@ -718,6 +843,8 @@ export {
 if (typeof globalThis !== 'undefined') {
   globalThis.neuraiDepinMsg = {
     buildDepinMessage,
+    buildDepinPreimage,
+    assembleDepinMessage,
     wrapMessageForServer,
     unwrapMessageFromServer,
     decryptDepinReceiveEncryptedPayload,

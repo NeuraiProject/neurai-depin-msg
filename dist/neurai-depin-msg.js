@@ -3456,6 +3456,97 @@ var neuraiDepinMsg = (() => {
       messageType
     };
   }
+  async function buildDepinPreimage(params) {
+    if (!params.token) throw new Error("Token is required");
+    if (!params.senderAddress) throw new Error("Sender address is required");
+    if (!params.senderPubKey || params.senderPubKey.length !== 66) {
+      throw new Error("Sender public key must be 66 hex characters");
+    }
+    if (!params.messageType) throw new Error("messageType is required");
+    const messageType = params.messageType;
+    if (messageType !== "private" && messageType !== "group") {
+      throw new Error('messageType must be "private" or "group"');
+    }
+    if (!params.message) throw new Error("Message is required");
+    if (!params.recipientPubKeys || params.recipientPubKeys.length === 0) {
+      throw new Error("At least one recipient is required");
+    }
+    if (messageType === "private") {
+      const senderHex2 = params.senderPubKey.toLowerCase();
+      const uniqueRecipients = new Set(
+        params.recipientPubKeys.map((pk) => pk.toLowerCase()).concat(senderHex2)
+      );
+      if (uniqueRecipients.size > 2) {
+        throw new Error('messageType "private" allows only one recipient plus the sender');
+      }
+    }
+    if (!params.timestamp || params.timestamp <= 0) {
+      throw new Error("Timestamp must be positive");
+    }
+    const senderPubKey = hexToBytes2(params.senderPubKey);
+    const recipientPubKeys = params.recipientPubKeys.map((pk) => {
+      if (pk.length !== 66) throw new Error("Recipient pubkey must be 66 hex chars");
+      return hexToBytes2(pk);
+    });
+    const senderHex = params.senderPubKey.toLowerCase();
+    if (!params.recipientPubKeys.some((pk) => pk.toLowerCase() === senderHex)) {
+      recipientPubKeys.push(senderPubKey);
+    }
+    const encoder = new TextEncoder();
+    const messageBytes = encoder.encode(params.message);
+    const eciesMsg = await eciesEncrypt(messageBytes, recipientPubKeys);
+    const encryptedPayload = serializeEciesMessage(eciesMsg);
+    const messageTypeByte = messageType === "private" ? 1 : 2;
+    return {
+      encryptedPayloadHex: bytesToHex2(encryptedPayload),
+      messageType,
+      messageTypeByte,
+      encryptedSize: encryptedPayload.length,
+      recipientCount: recipientPubKeys.length
+    };
+  }
+  async function assembleDepinMessage(params, signatureHexOrBytes) {
+    if (!params.token) throw new Error("Token is required");
+    if (!params.senderAddress) throw new Error("Sender address is required");
+    if (!params.encryptedPayloadHex) throw new Error("encryptedPayloadHex is required");
+    if (!params.messageType || params.messageType !== "private" && params.messageType !== "group") {
+      throw new Error('messageType must be "private" or "group"');
+    }
+    if (!params.timestamp || params.timestamp <= 0) throw new Error("Timestamp must be positive");
+    if (!signatureHexOrBytes) throw new Error("signature is required");
+    const normalizedPayload = normalizeHex(params.encryptedPayloadHex);
+    if (!normalizedPayload) throw new Error("Invalid encryptedPayloadHex");
+    const encryptedPayload = hexToBytes2(normalizedPayload);
+    const messageTypeByte = params.messageType === "private" ? 1 : 2;
+    let signature = typeof signatureHexOrBytes === "string" ? hexToBytes2(normalizeHex(signatureHexOrBytes)) : signatureHexOrBytes;
+    if (signature.length === 64) {
+      signature = secp256k1.Signature.fromCompact(signature).toDERRawBytes();
+    }
+    const hashData = concatBytes3(
+      serializeString(params.token),
+      serializeString(params.senderAddress),
+      serializeInt64(params.timestamp),
+      new Uint8Array([messageTypeByte]),
+      serializeVector(encryptedPayload)
+    );
+    const messageHashBytes = await doubleSha256(hashData);
+    const messageHash = bytesToHex2(messageHashBytes.slice().reverse());
+    const serialized = concatBytes3(
+      serializeString(params.token),
+      serializeString(params.senderAddress),
+      serializeInt64(params.timestamp),
+      new Uint8Array([messageTypeByte]),
+      serializeVector(encryptedPayload),
+      serializeVector(signature)
+    );
+    return {
+      hex: bytesToHex2(serialized),
+      messageHash,
+      messageHashBytes: bytesToHex2(messageHashBytes),
+      encryptedSize: encryptedPayload.length,
+      messageType: params.messageType
+    };
+  }
   async function wrapMessageForServer(messageHex, serverPubKeyHex, senderAddress) {
     if (!messageHex || !serverPubKeyHex || !senderAddress) {
       throw new Error("messageHex, serverPubKeyHex, and senderAddress are required");
@@ -3491,6 +3582,8 @@ var neuraiDepinMsg = (() => {
   if (typeof globalThis !== "undefined") {
     globalThis.neuraiDepinMsg = {
       buildDepinMessage,
+      buildDepinPreimage,
+      assembleDepinMessage,
       wrapMessageForServer,
       unwrapMessageFromServer,
       decryptDepinReceiveEncryptedPayload,

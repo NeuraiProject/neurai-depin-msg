@@ -1,210 +1,212 @@
 # @neuraiproject/neurai-depin-msg
 
-Build, encrypt, sign, and serialize DePIN messages compatible with Neurai Core.
+Build, send-prepare, **receive, validate and decrypt** DePIN encrypted
+messages for the [Neurai](https://neurai.org) blockchain, from a
+**non-custodial** client: the user's private key never leaves the
+application. Pure-JS crypto ([noble](https://paulmillr.com/noble/)), so it
+runs in browsers, Node.js (>= 18) and React Native (Hermes) without
+`crypto.subtle` or native modules.
 
-This library produces the hex payload for the Neurai RPC method `depinsubmitmsg`.
-It runs fully client-side (browser / local scripts) and does not require a backend.
+The library never opens network connections. Applications inject an
+`rpc.call(method, params)` function (node JSON-RPC) and, for remote pools, a
+`transport.request(host, port, payload)` function, and keep full control of
+transports, TLS, authentication and CORS.
 
-## What you get
-
-Given:
-- A plaintext message
-- Your sender address + private key
-- The compressed public keys of all recipients
-
-It returns:
-- `hex`: a serialized `CDepinMessage` ready to submit via `depinsubmitmsg`
-- `messageHash`: the message hash as typically displayed by Neurai Core
-
-## Install
-
-```bash
+```
 npm install @neuraiproject/neurai-depin-msg
 ```
 
-## Usage (Browser)
+| Entry | File |
+| --- | --- |
+| ESM `import` | `dist/neurai-depin-msg.mjs` |
+| CommonJS `require` | `dist/neurai-depin-msg.cjs` |
+| Browser `<script>` (global `neuraiDepinMsg`) | `dist/neurai-depin-msg.min.js` |
+| TypeScript types | `index.d.ts` |
 
-Include the bundled build (IIFE). It exposes a global `neuraiDepinMsg` object.
+## The DePIN model in one minute
 
-```html
-<script src="./dist/neurai-depin-msg.min.js"></script>
-<script>
-  async function build() {
-    const res = await neuraiDepinMsg.buildDepinMessage({
-      token: 'MYTOKEN',
-      senderAddress: 'NxxxxYourAddress',
-      senderPubKey: '02abcdef... (66 hex chars)',
-      privateKey: 'L... (WIF) OR 64-hex private key',
-      timestamp: Math.floor(Date.now() / 1000),
-      message: 'Hello from the browser!',
-      recipientPubKeys: [
-        '02deadbeef... (recipient 1 compressed pubkey)',
-        '03cafebabe... (recipient 2 compressed pubkey)'
-      ],
-      messageType: 'group'
-    });
+A message pool is rooted at a DePIN token such as `&NEWS`. Sub-assets are
+hierarchical **sections**: `&NEWS/GENERAL`, `&NEWS/GENERAL/SPORT`. A request
+for a token covers that token *and its descendants* — never its parent or
+siblings, and never lookalikes (`&TEST` does not cover `&TESTING`).
 
-    console.log('depinsubmitmsg hex:', res.hex);
-    console.log('messageHash:', res.messageHash);
-  }
+A holder is **active** for a token when it has positive balance, is not
+owner-frozen and not self-revoked. Sending to a section encrypts for the
+deduplicated union of active holders of the section and of its ancestors up
+to the pool root. The recipient set is fixed at send time.
 
-  build();
-</script>
-```
+Messages are hybrid-encrypted (ECIES secp256k1 + AES-256-GCM): one wrapped
+copy of the symmetric key per recipient public key. The sender is always
+included so it can read its own messages.
 
-Submit it to your node:
+The node needs `-assetindex` and `-pubkeyindex` for recipient resolution,
+and only addresses with an on-chain **revealed public key** can receive.
 
-```bash
-neurai-cli depinsubmitmsg "<HEX_FROM_LIBRARY>"
-```
-
-## Usage (Node.js)
-
-The published build is browser-style (IIFE) and attaches to `globalThis.neuraiDepinMsg`.
-All cryptography is pure-JS ([noble](https://paulmillr.com/noble/)), so it runs in
-the browser, Node and React Native/Hermes with no `crypto.subtle` requirement. The
-only host dependency is a secure RNG (`crypto.getRandomValues`) **when encrypting**
-— see [Environments](#environments) below.
+## Receiving (non-custodial)
 
 ```js
-// This executes the IIFE bundle and sets globalThis.neuraiDepinMsg
-import '@neuraiproject/neurai-depin-msg/dist/neurai-depin-msg.js';
+import { decodeDepinReceiveResponse } from '@neuraiproject/neurai-depin-msg';
 
-const { buildDepinMessage } = globalThis.neuraiDepinMsg;
-
-const res = await buildDepinMessage({
-  token: 'MYTOKEN',
-  senderAddress: 'NxxxxYourAddress',
-  senderPubKey: '02abcdef...(66 hex chars)',
-  privateKey: 'L... (WIF) OR 64-hex private key',
-  timestamp: Math.floor(Date.now() / 1000),
-  message: 'Hello from Node!',
-  recipientPubKeys: ['02deadbeef...'],
-  messageType: 'private'
+// rpcResult = result of depinreceivemsg(token, address, 0, "", 25) — the
+// library accepts all three shapes: plain array, {messages, has_more},
+// or the privacy-wrapped {encrypted}.
+const { messages, hasMore, wasEncrypted } = await decodeDepinReceiveResponse(rpcResult, {
+  network: 'mainnet',            // or 'test' ('testnet'/'regtest' aliases)
+  privateKey: userWifOrHex,      // decrypts and unwraps
+  requestedToken: '&NEWS',       // scope check: token must be &NEWS or a descendant
 });
 
-console.log(res.hex);
+for (const m of messages) {
+  if (!m.ok) continue;                    // failed local validation: do not display
+  if (m.plaintext === null) continue;     // not addressed to this key (normal)
+  console.log(m.message.sender, m.message.token, m.plaintext, m.signatureValid);
+}
 ```
 
-## API
+Every message is validated locally before it is considered displayable:
 
-### `neuraiDepinMsg.buildDepinMessage(params)`
+1. **Hash** — recomputed from the fields (`doubleSHA256` over the canonical
+   preimage *including* `messageType`) and compared with the `hash` field.
+2. **Signature** — DER secp256k1 over that hash. By default the library
+   *recovers* the public key from the signature and accepts it only when its
+   `hash160` (compressed or uncompressed form) equals the sender address
+   payload — no external key lookup needed. A `senderPubKey` /
+   `resolveSenderPubKey` fast path is available and is bound to the address
+   the same way. Signatures over the legacy pre-2.1.3 preimage (without
+   `messageType`) are rejected, as Core rejects them.
+3. **Scope** — the message token must be inside the requested scope.
+4. **Limits** — payload sizes, response counts, duplicate hashes.
+5. **Decryption** — last. A payload that does not decrypt just was not
+   addressed to this key; it is *not* an authorization error.
 
-The browser/IIFE global is `neuraiDepinMsg`.
+The `token` filter of `depinreceivemsg` is a UI scope, **not**
+authentication: real visibility is the cryptographic recipient list inside
+each message. Treat the RPC as an untrusted retrieval endpoint and rely on
+the local validation above.
 
-Builds a complete serialized `CDepinMessage` (as hex) suitable for `depinsubmitmsg`.
+### Pre-authenticated gateway messages
 
-#### Parameters
+Messages sent through `depinsendmsg`'s gateway path carry a 65-byte all-zero
+sentinel instead of a signature; Core authorized them via the gateway
+challenge/response, which the client cannot re-verify. By default they are
+**rejected** (`ok: false`, `authentication: 'gateway-preauthenticated'`).
+Pass `preAuthenticatedPolicy: 'trust-gateway'` only when the application
+authenticates and trusts the serving gateway session; even then
+`signatureValid` stays `false`.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `token` | `string` | yes | Token/asset name for the DePIN channel |
-| `senderAddress` | `string` | yes | Sender Neurai address (string as used by Core RPC) |
-| `senderPubKey` | `string` | yes | Sender compressed public key as hex (66 chars / 33 bytes) |
-| `privateKey` | `string` | yes | Sender private key as **WIF** or **64-hex** (32 bytes) |
-| `timestamp` | `number` | yes | Unix time (seconds) |
-| `message` | `string` | yes | Plaintext message (UTF-8) |
-| `recipientPubKeys` | `string[]` | yes | Recipient compressed pubkeys as hex (66 chars each). The sender pubkey is automatically added if missing so you can decrypt your own messages. |
-| `messageType` | `"private" \| "group"` | yes | Message type: `"private"` allows only one recipient plus the sender, `"group"` allows multiple recipients. |
+## Sending
 
-### `neuraiDepinMsg.decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipientPrivateKey)`
+### 1. Resolve recipients and build (local pool)
 
-Decrypts the `encrypted_payload_hex` returned by Neurai Core RPC `depinreceivemsg`.
+```js
+import { buildDepinMessageForPool } from '@neuraiproject/neurai-depin-msg';
 
-- `encryptedPayloadHex`: hex string for the serialized `CECIESEncryptedMessage`.
-- `recipientPrivateKey`: recipient private key as WIF or 64-hex.
+const rpc = { call: (method, params) => myNodeRpc(method, params) };
 
-Returns `string | null` (it returns `null` if the message is not for that key or authentication fails).
-
-Notes:
-- Public keys must be **compressed** (start with `02` or `03`).
-- This library does not discover recipients for a token; it only encrypts for the pubkeys you provide.
-
-#### Returns
-
-| Property | Type | Description |
-|----------|------|-------------|
-| `hex` | `string` | Hex-encoded serialized `CDepinMessage` |
-| `messageHash` | `string` | Double-SHA256 signing hash displayed in the typical Core-style (byte-reversed) |
-| `messageHashBytes` | `string` | Raw 32-byte digest as hex (not reversed) |
-| `encryptedSize` | `number` | Size of the serialized `CECIESEncryptedMessage` in bytes |
-| `recipientCount` | `number` | Number of recipients (including sender if auto-added) |
-| `messageType` | `"private" \| "group"` | The message type that was specified in the parameters. |
-
-## How it works (Core-compatible)
-
-### Encryption (Hybrid ECIES with AES-256-GCM)
-
-This matches Neurai Core's `CECIESEncryptedMessage` format (v2.0+):
-
-- Ephemeral keypair is generated per message.
-- Message encryption:
-  - AES-256-GCM encrypts plaintext with a derived AES key (no padding).
-  - Payload is stored as `[Nonce(12) || ciphertext || AuthTag(16)]`.
-- Per-recipient key wrapping:
-  - ECDH derives a shared secret from ephemeral privkey + recipient pubkey.
-  - A per-recipient `encKey` is derived and used to AES-256-GCM encrypt the 32-byte AES key.
-  - Recipient package is `[Nonce(12) || encryptedAESKey(32) || AuthTag(16)]` (60 bytes).
-
-### Serialization
-
-All fields are serialized using Bitcoin-style rules:
-- CompactSize prefixes for vectors/strings
-- Little-endian integers
-
-**Message structure:**
-```
-[token (string)]
-[senderAddress (string)]
-[timestamp (int64)]
-[messageType (uint8)]       // 0x01 = private, 0x02 = group
-[encryptedPayload (vector)]
-[signature (vector)]
+const { hex, messageHash, resolution } = await buildDepinMessageForPool({
+  token: '&NEWS/GENERAL',
+  poolRoot: '&NEWS',        // the pool's configured root (stop_at)
+  maxRecipients: 20,        // the pool's -depinmsgmaxusers (absolute cap 50)
+  rpc,
+  network: 'mainnet',
+  senderAddress, senderPubKey, privateKey,
+  message: 'hello sections', messageType: 'group',
+  timestamp: Math.floor(Date.now() / 1000),
+});
+await rpc.call('depinsubmitmsg', [hex]);
 ```
 
-### Signing
+`resolveDepinRecipients` enforces the pool contract and **fails closed**: a
+`truncated` response is never used, every returned key must hash to its own
+address, holders are deduplicated by curve point, and the *final* ECIES map
+(recipients ∪ auto-included sender) must fit `maxRecipients` — Core applies
+the limit to that map, so an over-limit message would be rejected anyway.
 
-The signature hash is:
+> The node answering `depingetancestorrecipients` is a **trust root** for
+> confidentiality: the library can check the response's internal consistency,
+> but not that the holder set itself is honest. Resolve recipients against a
+> node you trust.
 
-`doubleSHA256( serialize(token) || serialize(senderAddress) || int64(timestamp) || uint8(messageType) || vector(encryptedPayloadBytes) )`
+### 2. Remote pools
 
-`messageHash` is the display-friendly byte-reversed form (similar to how Core prints `uint256`).
-
-## Demo
-
-Open `demo.html` in a browser (a local server is recommended):
-
-```bash
-python3 -m http.server 8080
-# Open http://localhost:8080/demo.html
+```js
+const transport = { request: (host, port, payload) => myTcpRequest(host, port, payload) };
+const out = await buildDepinMessageForRemotePool({
+  host, port, transport, rpc,
+  token: '&NEWS/GENERAL', network: 'mainnet',
+  senderAddress, senderPubKey, privateKey,
+  message: 'hi', messageType: 'group',
+  timestamp: Math.floor(Date.now() / 1000),
+});
 ```
 
-## Environments
+The remote pool's `INFO` is queried first; its root becomes `stop_at` and its
+limit becomes `maxRecipients`. If `INFO` fails or is unrecognized, the build
+fails — never encrypt for a pool whose contract you could not read.
 
-All cryptography is pure-JS ([`@noble/curves`](https://github.com/paulmillr/noble-curves),
-[`@noble/ciphers`](https://github.com/paulmillr/noble-ciphers),
-[`@noble/hashes`](https://github.com/paulmillr/noble-hashes)) — **no `crypto.subtle`
-(WebCrypto) needed**. Works in the browser, Node and React Native/Hermes.
+Alternatively, Core's wallet-backed `depinsendmsg` performs the gateway
+`AUTH` challenge itself; that TCP flow is intentionally out of scope here
+(implement it in an application adapter if needed).
 
-The only host requirement is a secure random source, `crypto.getRandomValues`, used
-to generate the ephemeral key and nonces **when encrypting**:
+### 3. External signers (hardware wallets)
 
-- **Browser / Node 18+**: available natively, nothing to do.
-- **React Native / Hermes**: `crypto.getRandomValues` is **not** built in. Add the
-  polyfill once, at your app entry point, before using the library:
+`buildDepinPreimage` encrypts and returns the fields to sign;
+`assembleDepinMessage` combines them with the DER (or compact 64-byte)
+signature into the final wire format. The private key never touches the
+library.
 
-  ```js
-  import 'react-native-get-random-values';   // must run before buildDepinMessage()
-  ```
+## Transport privacy wrapper
 
-**Decryption** (`decryptDepinReceiveEncryptedPayload`) needs no RNG and no polyfill.
+`wrapMessageForServer` / `unwrapMessageFromServer` ECIES-wrap traffic for a
+pool's key. This hides content from the transport only — it does **not**
+authenticate the server. Same for the `{encrypted}` response wrapper:
+authenticate the RPC transport separately when that property matters.
 
-## Development
+## Utilities
 
-```bash
-npm run build:dev   # dist/neurai-depin-msg.js
-npm run build       # dist/neurai-depin-msg.min.js
+`validateDepinSectionToken`, `isDepinTokenInScope`, `getDepinTokenAncestors`,
+`parseDepinMessage`, `verifyDepinReceivedMessage`, `parseDepinPoolInfo`,
+key/address helpers (`parsePublicKey`, `decodeP2PKHAddress`,
+`pubKeyMatchesAddress`, `wifToHex`...) and the ECIES primitives are all
+exported — see `index.d.ts` for the full typed surface.
+
+Public keys are accepted in both serializations (33-byte compressed and
+65-byte uncompressed) everywhere, matching Core; identity comparisons are by
+curve point, while `hash160`/address bindings always use the exact bytes.
+
+## Testing
+
 ```
+npm test                 # runs against committed Core-generated fixtures
+npm run gen-fixtures     # regenerates fixtures against a throwaway neuraid regtest
+```
+
+`scripts/generate-fixtures.mjs` drives a real `neuraid` (set
+`NEURAI_BIN_DIR`): issues `&FIXTURE` and `&FIXTURE/NEWS`, reveals compressed
+and uncompressed keys, submits library-built messages (Core's acceptance
+validates serialization, hash and signature) and captures
+`depinreceivemsg` / `depingetancestorrecipients` / gateway `INFO` responses.
+
+## 2.3.0 changes
+
+- New: full non-custodial receive pipeline, recipient resolution, remote
+  pool helpers, token/scope utilities, message parsing and verification.
+- Signature verification uses only the unified hash (`messageType`
+  included); legacy signatures are rejected — requires a Core with the
+  unified signing (2026-07 or later).
+- Pre-authenticated gateway sentinels are rejected unless the application
+  explicitly opts into trusting the gateway.
+- Uncompressed (65-byte) public keys supported end to end; decryption tries
+  both forms of the recipient key.
+- `buildDepinMessage` now validates key coherence (privateKey ↔ senderPubKey
+  ↔ senderAddress), token syntax, and the final recipient map size —
+  messages Core would reject now fail at build time.
+- Stricter parsing everywhere: canonical CompactSize, no duplicate recipient
+  ids, no trailing bytes, validated hex. ECIES map entries serialize in
+  Core's `std::map<uint160,...>` numeric order.
+- Packaging: ESM + CJS entries with an `exports` map, TypeScript
+  definitions, `buildDepinPreimage`/`assembleDepinMessage` properly exported.
+- Removed `console.log` noise from the build path.
 
 ## License
 

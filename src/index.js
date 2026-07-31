@@ -1,842 +1,114 @@
 /**
  * @neuraiproject/neurai-depin-msg
- * 
- * Build encrypted DePIN messages for Neurai blockchain
- * Self-contained library with bundled secp256k1
- */
-
-import { secp256k1 } from '@noble/curves/secp256k1';
-import { gcm } from '@noble/ciphers/aes';
-import { sha256 as nobleSha256 } from '@noble/hashes/sha256';
-import { ripemd160 as nobleRipemd160 } from '@noble/hashes/ripemd160';
-
-// ============================================
-// SERIALIZATION UTILITIES
-// ============================================
-
-function writeCompactSize(value) {
-  if (value < 0) throw new Error('CompactSize cannot be negative');
-  
-  if (value < 253) {
-    return new Uint8Array([value]);
-  } else if (value <= 0xffff) {
-    const buf = new Uint8Array(3);
-    buf[0] = 253;
-    buf[1] = value & 0xff;
-    buf[2] = (value >> 8) & 0xff;
-    return buf;
-  } else if (value <= 0xffffffff) {
-    const buf = new Uint8Array(5);
-    buf[0] = 254;
-    buf[1] = value & 0xff;
-    buf[2] = (value >> 8) & 0xff;
-    buf[3] = (value >> 16) & 0xff;
-    buf[4] = (value >> 24) & 0xff;
-    return buf;
-  } else {
-    const buf = new Uint8Array(9);
-    buf[0] = 255;
-    const low = value >>> 0;
-    const high = Math.floor(value / 0x100000000) >>> 0;
-    buf[1] = low & 0xff;
-    buf[2] = (low >> 8) & 0xff;
-    buf[3] = (low >> 16) & 0xff;
-    buf[4] = (low >> 24) & 0xff;
-    buf[5] = high & 0xff;
-    buf[6] = (high >> 8) & 0xff;
-    buf[7] = (high >> 16) & 0xff;
-    buf[8] = (high >> 24) & 0xff;
-    return buf;
-  }
-}
-
-function serializeString(str) {
-  const encoder = new TextEncoder();
-  const strBytes = encoder.encode(str);
-  return concatBytes(writeCompactSize(strBytes.length), strBytes);
-}
-
-function serializeVector(data) {
-  return concatBytes(writeCompactSize(data.length), data);
-}
-
-function serializeInt64(value) {
-  const buf = new Uint8Array(8);
-  const low = value >>> 0;
-  const high = Math.floor(value / 0x100000000) >>> 0;
-  buf[0] = low & 0xff;
-  buf[1] = (low >> 8) & 0xff;
-  buf[2] = (low >> 16) & 0xff;
-  buf[3] = (low >> 24) & 0xff;
-  buf[4] = high & 0xff;
-  buf[5] = (high >> 8) & 0xff;
-  buf[6] = (high >> 16) & 0xff;
-  buf[7] = (high >> 24) & 0xff;
-  return buf;
-}
-
-function concatBytes(...arrays) {
-  const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const arr of arrays) {
-    result.set(arr, offset);
-    offset += arr.length;
-  }
-  return result;
-}
-
-function hexToBytes(hex) {
-  if (hex.length % 2 !== 0) throw new Error('Hex must have even length');
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
-  }
-  return bytes;
-}
-
-function bytesToHex(bytes) {
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function normalizeHex(hex) {
-  if (typeof hex !== 'string') return null;
-  const trimmed = hex.trim().toLowerCase();
-  const noPrefix = trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed;
-  if (noPrefix.length === 0) return null;
-  if (!/^[0-9a-f]+$/.test(noPrefix)) return null;
-  if (noPrefix.length % 2 !== 0) return null;
-  return noPrefix;
-}
-
-function timingSafeEqual(a, b) {
-  if (!(a instanceof Uint8Array) || !(b instanceof Uint8Array)) return false;
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
-  return diff === 0;
-}
-
-function readCompactSize(buf, offset) {
-  if (offset >= buf.length) throw new Error('CompactSize: out of bounds');
-  const first = buf[offset];
-  if (first < 253) return { value: first, offset: offset + 1 };
-  if (first === 253) {
-    if (offset + 3 > buf.length) throw new Error('CompactSize: truncated uint16');
-    const value = buf[offset + 1] | (buf[offset + 2] << 8);
-    return { value, offset: offset + 3 };
-  }
-  if (first === 254) {
-    if (offset + 5 > buf.length) throw new Error('CompactSize: truncated uint32');
-    const value =
-      (buf[offset + 1]) |
-      (buf[offset + 2] << 8) |
-      (buf[offset + 3] << 16) |
-      (buf[offset + 4] << 24);
-    return { value: value >>> 0, offset: offset + 5 };
-  }
-  if (offset + 9 > buf.length) throw new Error('CompactSize: truncated uint64');
-  let value = 0n;
-  for (let i = 0; i < 8; i++) {
-    value |= BigInt(buf[offset + 1 + i]) << (8n * BigInt(i));
-  }
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error('CompactSize: value too large');
-  }
-  return { value: Number(value), offset: offset + 9 };
-}
-
-function readVector(buf, offset) {
-  const { value: len, offset: afterLen } = readCompactSize(buf, offset);
-  if (afterLen + len > buf.length) throw new Error('Vector: truncated');
-  const data = buf.slice(afterLen, afterLen + len);
-  return { data, offset: afterLen + len };
-}
-
-function deserializeEciesMessage(serialized) {
-  if (!(serialized instanceof Uint8Array)) throw new Error('deserializeEciesMessage: invalid input');
-  let offset = 0;
-
-  const ephem = readVector(serialized, offset);
-  const ephemeralPubKey = ephem.data;
-  offset = ephem.offset;
-  if (ephemeralPubKey.length !== 33 && ephemeralPubKey.length !== 65) {
-    throw new Error('Invalid ephemeral pubkey length: ' + ephemeralPubKey.length);
-  }
-
-  const payloadVec = readVector(serialized, offset);
-  const encryptedPayload = payloadVec.data;
-  offset = payloadVec.offset;
-
-  const countRes = readCompactSize(serialized, offset);
-  const count = countRes.value;
-  offset = countRes.offset;
-
-  const recipientKeys = new Map();
-  for (let i = 0; i < count; i++) {
-    if (offset + 20 > serialized.length) throw new Error('recipientKeys: truncated keyid');
-    const keyId = serialized.slice(offset, offset + 20);
-    offset += 20;
-    const v = readVector(serialized, offset);
-    offset = v.offset;
-    recipientKeys.set(bytesToHex(keyId), v.data);
-  }
-
-  return { ephemeralPubKey, encryptedPayload, recipientKeys };
-}
-
-// ============================================
-// BASE58 / WIF UTILITIES
-// ============================================
-
-const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
-
-function base58Decode(str) {
-  const bytes = [];
-  for (let i = 0; i < str.length; i++) {
-    const charIndex = BASE58_ALPHABET.indexOf(str[i]);
-    if (charIndex === -1) throw new Error('Invalid Base58 character: ' + str[i]);
-    
-    let carry = charIndex;
-    for (let j = 0; j < bytes.length; j++) {
-      carry += bytes[j] * 58;
-      bytes[j] = carry & 0xff;
-      carry >>= 8;
-    }
-    while (carry > 0) {
-      bytes.push(carry & 0xff);
-      carry >>= 8;
-    }
-  }
-  
-  for (let i = 0; i < str.length && str[i] === '1'; i++) {
-    bytes.push(0);
-  }
-  
-  return new Uint8Array(bytes.reverse());
-}
-
-async function wifToHex(wif) {
-  const decoded = base58Decode(wif);
-  
-  if (decoded.length < 37) {
-    throw new Error('Invalid WIF: too short');
-  }
-  
-  const payload = decoded.slice(0, -4);
-  const checksum = decoded.slice(-4);
-  const hash = await doubleSha256(payload);
-  
-  for (let i = 0; i < 4; i++) {
-    if (checksum[i] !== hash[i]) {
-      throw new Error('Invalid WIF: checksum mismatch');
-    }
-  }
-  
-  let privateKeyBytes;
-  if (payload.length === 34) {
-    privateKeyBytes = payload.slice(1, 33);
-  } else if (payload.length === 33) {
-    privateKeyBytes = payload.slice(1, 33);
-  } else {
-    throw new Error('Invalid WIF: unexpected length ' + payload.length);
-  }
-  
-  return bytesToHex(privateKeyBytes);
-}
-
-function isWIF(str) {
-  return /^[5KLcT][1-9A-HJ-NP-Za-km-z]{50,51}$/.test(str);
-}
-
-// ============================================
-// CRYPTOGRAPHIC FUNCTIONS
-// ============================================
-
-async function sha256(data) {
-  // Pure-JS (noble) so it runs under Hermes/React Native (no crypto.subtle).
-  return nobleSha256(data);
-}
-
-async function doubleSha256(data) {
-  const first = await sha256(data);
-  return sha256(first);
-}
-
-function ripemd160(data) {
-  // Pure-JS (noble) so it runs under Hermes/React Native (no crypto.subtle).
-  // Byte-identical to the previous hand-rolled impl (verified via hash160 vectors).
-  return nobleRipemd160(data);
-}
-
-async function hash160(data) {
-  const sha = await sha256(data);
-  return ripemd160(sha);
-}
-
-async function kdfSha256(sharedSecret, outputLen) {
-  const output = new Uint8Array(outputLen);
-  let offset = 0;
-  let counter = 1;
-
-  while (offset < outputLen) {
-    const counterBytes = new Uint8Array(4);
-    counterBytes[0] = (counter >> 24) & 0xff;
-    counterBytes[1] = (counter >> 16) & 0xff;
-    counterBytes[2] = (counter >> 8) & 0xff;
-    counterBytes[3] = counter & 0xff;
-
-    const data = concatBytes(sharedSecret, counterBytes);
-    const hash = await sha256(data);
-
-    const remaining = outputLen - offset;
-    const toCopy = Math.min(remaining, 32);
-    output.set(hash.slice(0, toCopy), offset);
-    offset += toCopy;
-    counter++;
-  }
-
-  return output;
-}
-
-function randomBytes(length) {
-  const bytes = new Uint8Array(length);
-  crypto.getRandomValues(bytes);
-  return bytes;
-}
-
-/**
- * AES-256-GCM encryption (noble; runs under Hermes/React Native)
- * @param {Uint8Array} plaintext
- * @param {Uint8Array} key - 32 bytes
- * @param {Uint8Array} nonce - 12 bytes
- * @returns {Promise<{ciphertext: Uint8Array, tag: Uint8Array}>}
- */
-async function aes256GcmEncrypt(plaintext, key, nonce) {
-  if (key.length !== 32) throw new Error('Key must be 32 bytes');
-  if (nonce.length !== 12) throw new Error('Nonce must be 12 bytes');
-
-  // noble returns ciphertext||tag with a 16-byte tag at the end, same as WebCrypto.
-  const out = gcm(key, nonce).encrypt(plaintext);
-  const ciphertext = out.slice(0, -16);
-  const tag = out.slice(-16);
-
-  return { ciphertext, tag };
-}
-
-/**
- * AES-256-GCM decryption
- * @param {Uint8Array} ciphertext
- * @param {Uint8Array} key - 32 bytes
- * @param {Uint8Array} nonce - 12 bytes
- * @param {Uint8Array} tag - 16 bytes
- * @returns {Promise<Uint8Array>}
- */
-async function aes256GcmDecrypt(ciphertext, key, nonce, tag) {
-  if (key.length !== 32) throw new Error('Key must be 32 bytes');
-  if (nonce.length !== 12) throw new Error('Nonce must be 12 bytes');
-  if (tag.length !== 16) throw new Error('Tag must be 16 bytes');
-
-  // noble throws on authentication failure, like WebCrypto's OperationError.
-  return gcm(key, nonce).decrypt(concatBytes(ciphertext, tag));
-}
-
-async function normalizePrivateKeyTo32Bytes(wifOrHex) {
-  if (typeof wifOrHex !== 'string' || wifOrHex.length === 0) {
-    throw new Error('Private key is required');
-  }
-
-  if (isWIF(wifOrHex)) {
-    const hex = await wifToHex(wifOrHex);
-    return hexToBytes(hex);
-  }
-
-  const norm = normalizeHex(wifOrHex);
-  if (!norm) throw new Error('Private key must be WIF or 64-hex');
-  if (norm.length !== 64) throw new Error('Private key must be 32 bytes (64 hex chars)');
-  return hexToBytes(norm);
-}
-
-/**
- * Decrypts `encrypted_payload_hex` from Neurai RPC `depinreceivemsg`.
  *
- * Returns the decrypted plaintext (UTF-8) or null if the payload is not intended
- * for the provided private key, or if authentication fails.
+ * Build, send-prepare, receive, validate, and decrypt DePIN encrypted
+ * messages for the Neurai blockchain. Self-contained (noble crypto), runs in
+ * browsers, Node, and React Native. Network access is always injected; the
+ * library never opens connections itself.
  */
-async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipientPrivateKey) {
-  const normalized = normalizeHex(encryptedPayloadHex);
-  if (!normalized) throw new Error('Invalid encryptedPayloadHex');
 
-  const serialized = hexToBytes(normalized);
-  const msg = deserializeEciesMessage(serialized);
-
-  const recipientPrivKeyBytes = await normalizePrivateKeyTo32Bytes(recipientPrivateKey);
-  const recipientPubKeyCompressed = secp256k1.getPublicKey(recipientPrivKeyBytes, true);
-  if (!(recipientPubKeyCompressed instanceof Uint8Array) || recipientPubKeyCompressed.length !== 33) {
-    throw new Error('Failed to derive recipient public key');
-  }
-
-  const keyIdBytes = await hash160(recipientPubKeyCompressed);
-  const keyIdHex = bytesToHex(keyIdBytes);
-  const keyIdHexReversed = bytesToHex(keyIdBytes.slice().reverse());
-
-  const recipientPackage = msg.recipientKeys.get(keyIdHex) ?? msg.recipientKeys.get(keyIdHexReversed);
-  if (!recipientPackage) return null;
-  // GCM format: Nonce(12) + encrypted_key(32) + Tag(16) = 60 bytes minimum
-  if (recipientPackage.length < 12 + 32 + 16) return null;
-
-  const recipientNonce = recipientPackage.slice(0, 12);
-  const encryptedAESKey = recipientPackage.slice(12, recipientPackage.length - 16);
-  const recipientTag = recipientPackage.slice(recipientPackage.length - 16);
-
-  // ECDH secret must match Core's ecdh module: SHA256(compressed(shared_point))
-  // getSharedSecret(priv, pub) == pointMultiply(pub, priv): raw compressed ECDH point.
-  const sharedPointCompressed = secp256k1.getSharedSecret(recipientPrivKeyBytes, msg.ephemeralPubKey, true);
-  const sharedSecret = await sha256(sharedPointCompressed);
-  const encKey = await kdfSha256(sharedSecret, 32);
-
-  // Decrypt AES key with GCM (tag verified automatically)
-  let aesKey;
-  try {
-    aesKey = await aes256GcmDecrypt(encryptedAESKey, encKey, recipientNonce, recipientTag);
-  } catch {
-    return null; // Authentication failed
-  }
-  if (aesKey.length !== 32) return null;
-
-  const payload = msg.encryptedPayload;
-  // GCM format: Nonce(12) + ciphertext + Tag(16) = 28 bytes minimum
-  if (payload.length < 12 + 1 + 16) return null;
-  const payloadNonce = payload.slice(0, 12);
-  const ciphertext = payload.slice(12, payload.length - 16);
-  const payloadTag = payload.slice(payload.length - 16);
-
-  // Decrypt payload with GCM (tag verified automatically)
-  let plaintextBytes;
-  try {
-    plaintextBytes = await aes256GcmDecrypt(ciphertext, aesKey, payloadNonce, payloadTag);
-  } catch {
-    return null; // Authentication failed
-  }
-
-  const decoder = new TextDecoder();
-  return decoder.decode(plaintextBytes);
-}
-
-// ============================================
-// ECIES ENCRYPTION (using @noble/curves/secp256k1)
-// ============================================
-
-async function eciesEncrypt(plaintext, recipientPubKeys) {
-  // Neurai Core-compatible hybrid ECIES with AES-256-GCM (see src/depinecies.cpp)
-  // - Ephemeral keypair per message
-  // - AES key derived from ephemeral privkey via KDF_SHA256
-  // - Payload: [Nonce(12) || ciphertext || Tag(16)]
-  // - Per-recipient package: [Nonce(12) || AES256_GCM(encKey, aesKey) || Tag(16)]
-  // - encKey derived from ECDH secret (secp256k1_ecdh default), then KDF_SHA256
-
-  // Generate ephemeral key pair
-  const ephemeralPrivKey = randomBytes(32);
-  const ephemeralPubKey = secp256k1.getPublicKey(ephemeralPrivKey, true);
-  if (!(ephemeralPubKey instanceof Uint8Array) || ephemeralPubKey.length !== 33) {
-    throw new Error('Failed to generate ephemeral public key');
-  }
-
-  // Derive AES key from ephemeral private key (matches KDF_SHA256 in C++)
-  const aesKey = await kdfSha256(ephemeralPrivKey, 32);
-
-  // Encrypt message with AES-256-GCM (no padding needed)
-  const nonce = randomBytes(12);
-  const { ciphertext, tag } = await aes256GcmEncrypt(plaintext, aesKey, nonce);
-
-  // Payload format: [Nonce(12) || ciphertext || Tag(16)]
-  const payload = concatBytes(nonce, ciphertext, tag);
-
-  // For each recipient, encrypt the AES key
-  const recipientKeys = new Map();
-
-  for (const recipientPubKey of recipientPubKeys) {
-    if (!(recipientPubKey instanceof Uint8Array) || recipientPubKey.length !== 33) {
-      throw new Error('Recipient pubkey must be 33 bytes compressed');
-    }
-
-    // ECDH secret must match libsecp256k1's default: SHA256(compressed(shared_point))
-    // See src/secp256k1/src/modules/ecdh/main_impl.h
-    const sharedPointCompressed = secp256k1.getSharedSecret(ephemeralPrivKey, recipientPubKey, true);
-    const sharedSecret = await sha256(sharedPointCompressed);
-
-    // Derive per-recipient encryption key
-    const encKey = await kdfSha256(sharedSecret, 32);
-
-    // Encrypt the AES key using AES-256-GCM with random per-recipient nonce
-    const recipientNonce = randomBytes(12);
-    const { ciphertext: encryptedAESKey, tag: recipientTag } = await aes256GcmEncrypt(aesKey, encKey, recipientNonce);
-
-    // Recipient package format: [Nonce(12) || encrypted_aes_key(32) || Tag(16)]
-    const recipientPackage = concatBytes(recipientNonce, encryptedAESKey, recipientTag);
-
-    // Map key is address hash160 (CKeyID): Hash160(serialized pubkey)
-    const keyHash = await hash160(recipientPubKey);
-    const keyHashHex = bytesToHex(keyHash);
-    recipientKeys.set(keyHashHex, recipientPackage);
-  }
-
-  return {
-    ephemeralPubKey,
-    encryptedPayload: payload,
-    recipientKeys
-  };
-}
-
-function serializeEciesMessage(msg) {
-  const parts = [];
-  parts.push(serializeVector(msg.ephemeralPubKey));
-
-  // CECIESEncryptedMessage serializes encryptedPayload as a vector (CompactSize + bytes)
-  parts.push(serializeVector(msg.encryptedPayload));
-
-  // recipientKeys is a std::map<uint160, vector<unsigned char>>
-  // Serialize as: CompactSize(count) + repeated (uint160 key raw 20 bytes) + (vector value)
-  const entries = Array.from(msg.recipientKeys.entries()).map(([hash160Hex, recipientPackage]) => {
-    const keyBytes = hexToBytes(hash160Hex);
-    if (keyBytes.length !== 20) throw new Error('recipient key hash160 must be 20 bytes');
-    return { keyBytes, recipientPackage };
-  });
-
-  // Deterministic order (helps reproducibility; C++ map is ordered)
-  entries.sort((a, b) => {
-    for (let i = 0; i < 20; i++) {
-      if (a.keyBytes[i] !== b.keyBytes[i]) return a.keyBytes[i] - b.keyBytes[i];
-    }
-    return 0;
-  });
-
-  parts.push(writeCompactSize(entries.length));
-  for (const { keyBytes, recipientPackage } of entries) {
-    parts.push(keyBytes);
-    parts.push(serializeVector(recipientPackage));
-  }
-
-  return concatBytes(...parts);
-}
-
-// ============================================
-// MAIN API
-// ============================================
-
-async function buildDepinMessage(params) {
-  // Validate
-  if (!params.token) throw new Error('Token is required');
-  if (!params.senderAddress) throw new Error('Sender address is required');
-  if (!params.senderPubKey || params.senderPubKey.length !== 66) {
-    throw new Error('Sender public key must be 66 hex characters');
-  }
-  if (!params.messageType) {
-    throw new Error('messageType is required');
-  }
-  const messageType = params.messageType;
-  if (messageType !== 'private' && messageType !== 'group') {
-    throw new Error('messageType must be "private" or "group"');
-  }
-  
-  // Handle private key - can be WIF or hex
-  let privateKeyHex = params.privateKey;
-  if (!privateKeyHex) {
-    throw new Error('Private key is required');
-  }
-  
-  // Auto-detect and convert WIF to hex
-  if (isWIF(privateKeyHex)) {
-    console.log('Detected WIF format, converting to hex...');
-    privateKeyHex = await wifToHex(privateKeyHex);
-    console.log('Private key converted successfully');
-  }
-  
-  if (privateKeyHex.length !== 64) {
-    throw new Error('Private key must be 64 hex characters (or WIF format)');
-  }
-  
-  if (!params.message) throw new Error('Message is required');
-  if (!params.recipientPubKeys || params.recipientPubKeys.length === 0) {
-    throw new Error('At least one recipient is required');
-  }
-  if (messageType === 'private') {
-    const senderHex = params.senderPubKey.toLowerCase();
-    const uniqueRecipients = new Set(
-      params.recipientPubKeys.map(pk => pk.toLowerCase()).concat(senderHex)
-    );
-    if (uniqueRecipients.size > 2) {
-      throw new Error('messageType "private" allows only one recipient plus the sender');
-    }
-  }
-  if (!params.timestamp || params.timestamp <= 0) {
-    throw new Error('Timestamp must be positive');
-  }
-
-  // Convert to bytes
-  const privateKey = hexToBytes(privateKeyHex);
-  const senderPubKey = hexToBytes(params.senderPubKey);
-
-  // Parse recipients
-  const recipientPubKeys = params.recipientPubKeys.map(pk => {
-    if (pk.length !== 66) throw new Error('Recipient pubkey must be 66 hex chars');
-    return hexToBytes(pk);
-  });
-
-  // Include sender so they can decrypt their own messages
-  const senderHex = params.senderPubKey.toLowerCase();
-  if (!params.recipientPubKeys.some(pk => pk.toLowerCase() === senderHex)) {
-    recipientPubKeys.push(senderPubKey);
-  }
-
-  // Encode message
-  const encoder = new TextEncoder();
-  const messageBytes = encoder.encode(params.message);
-
-  // ECIES encrypt
-  const eciesMsg = await eciesEncrypt(messageBytes, recipientPubKeys);
-  const encryptedPayload = serializeEciesMessage(eciesMsg);
-
-  // Convert messageType to byte (0x01 = private, 0x02 = group)
-  const messageTypeByte = messageType === 'private' ? 0x01 : 0x02;
-
-  // Build hash data for signing
-  const hashData = concatBytes(
-    serializeString(params.token),
-    serializeString(params.senderAddress),
-    serializeInt64(params.timestamp),
-    new Uint8Array([messageTypeByte]),
-    serializeVector(encryptedPayload)
-  );
-
-  // Neurai Core uses CHashWriter (SER_GETHASH), which is double-SHA256.
-  // This MUST match VerifyDepinMessageSignature in src/depinmsgpool.cpp.
-  const messageHashBytes = await doubleSha256(hashData);
-  // Neurai (like Bitcoin) typically displays uint256 hashes byte-reversed.
-  // This makes `messageHash` match what you'll see in debug.log.
-  const messageHash = bytesToHex(messageHashBytes.slice().reverse());
-
-  // Sign with secp256k1 (noble: deterministic RFC6979, low-S canonical by default).
-  // .toDERRawBytes() yields the DER-encoded signature expected by Neurai Core.
-  const signature = secp256k1.sign(messageHashBytes, privateKey).toDERRawBytes();
-
-  // Serialize complete message
-  // Order: [token][senderAddress][timestamp][messageType][encryptedPayload][signature]
-  const serialized = concatBytes(
-    serializeString(params.token),
-    serializeString(params.senderAddress),
-    serializeInt64(params.timestamp),
-    new Uint8Array([messageTypeByte]),
-    serializeVector(encryptedPayload),
-    serializeVector(signature)
-  );
-
-  return {
-    hex: bytesToHex(serialized),
-    messageHash,
-    messageHashBytes: bytesToHex(messageHashBytes),
-    encryptedSize: encryptedPayload.length,
-    recipientCount: recipientPubKeys.length,
-    messageType: messageType
-  };
-}
-
-/**
- * buildDepinPreimage
- * The signature-less half of buildDepinMessage, for external signers (hardware
- * wallets that never expose the private key). ECIES-encrypts the message for the
- * recipients (the sender is auto-included) and returns the `encryptedPayload`
- * hex plus the fields needed to sign. The signer feeds token / senderAddress /
- * timestamp / messageTypeByte / encryptedPayload to the device (`depin_sign`,
- * which rebuilds the same preimage and signs its double-SHA256), then passes the
- * returned DER signature to {@link assembleDepinMessage}. No private key.
- */
-async function buildDepinPreimage(params) {
-  if (!params.token) throw new Error('Token is required');
-  if (!params.senderAddress) throw new Error('Sender address is required');
-  if (!params.senderPubKey || params.senderPubKey.length !== 66) {
-    throw new Error('Sender public key must be 66 hex characters');
-  }
-  if (!params.messageType) throw new Error('messageType is required');
-  const messageType = params.messageType;
-  if (messageType !== 'private' && messageType !== 'group') {
-    throw new Error('messageType must be "private" or "group"');
-  }
-  if (!params.message) throw new Error('Message is required');
-  if (!params.recipientPubKeys || params.recipientPubKeys.length === 0) {
-    throw new Error('At least one recipient is required');
-  }
-  if (messageType === 'private') {
-    const senderHex = params.senderPubKey.toLowerCase();
-    const uniqueRecipients = new Set(
-      params.recipientPubKeys.map(pk => pk.toLowerCase()).concat(senderHex)
-    );
-    if (uniqueRecipients.size > 2) {
-      throw new Error('messageType "private" allows only one recipient plus the sender');
-    }
-  }
-  if (!params.timestamp || params.timestamp <= 0) {
-    throw new Error('Timestamp must be positive');
-  }
-
-  const senderPubKey = hexToBytes(params.senderPubKey);
-  const recipientPubKeys = params.recipientPubKeys.map(pk => {
-    if (pk.length !== 66) throw new Error('Recipient pubkey must be 66 hex chars');
-    return hexToBytes(pk);
-  });
-  // Include sender so they can decrypt their own messages (matches buildDepinMessage).
-  const senderHex = params.senderPubKey.toLowerCase();
-  if (!params.recipientPubKeys.some(pk => pk.toLowerCase() === senderHex)) {
-    recipientPubKeys.push(senderPubKey);
-  }
-
-  const encoder = new TextEncoder();
-  const messageBytes = encoder.encode(params.message);
-  const eciesMsg = await eciesEncrypt(messageBytes, recipientPubKeys);
-  const encryptedPayload = serializeEciesMessage(eciesMsg);
-  const messageTypeByte = messageType === 'private' ? 0x01 : 0x02;
-
-  return {
-    encryptedPayloadHex: bytesToHex(encryptedPayload),
-    messageType,
-    messageTypeByte,
-    encryptedSize: encryptedPayload.length,
-    recipientCount: recipientPubKeys.length
-  };
-}
-
-/**
- * assembleDepinMessage
- * The finalization half of buildDepinMessage: given the fields and the
- * `encryptedPayload` produced by {@link buildDepinPreimage} plus the DER
- * signature returned by an external signer, serializes the complete
- * CDepinMessage (identical wire format to buildDepinMessage) ready for
- * `depinsubmitmsg`. Accepts the signature as hex or bytes; a raw 64-byte
- * (r||s) signature is DER-encoded automatically.
- */
-async function assembleDepinMessage(params, signatureHexOrBytes) {
-  if (!params.token) throw new Error('Token is required');
-  if (!params.senderAddress) throw new Error('Sender address is required');
-  if (!params.encryptedPayloadHex) throw new Error('encryptedPayloadHex is required');
-  if (!params.messageType || (params.messageType !== 'private' && params.messageType !== 'group')) {
-    throw new Error('messageType must be "private" or "group"');
-  }
-  if (!params.timestamp || params.timestamp <= 0) throw new Error('Timestamp must be positive');
-  if (!signatureHexOrBytes) throw new Error('signature is required');
-
-  const normalizedPayload = normalizeHex(params.encryptedPayloadHex);
-  if (!normalizedPayload) throw new Error('Invalid encryptedPayloadHex');
-  const encryptedPayload = hexToBytes(normalizedPayload);
-  const messageTypeByte = params.messageType === 'private' ? 0x01 : 0x02;
-
-  let signature =
-    typeof signatureHexOrBytes === 'string'
-      ? hexToBytes(normalizeHex(signatureHexOrBytes))
-      : signatureHexOrBytes;
-  // A raw compact (r||s) signature -> DER, matching buildDepinMessage's DER form.
-  if (signature.length === 64) {
-    signature = secp256k1.Signature.fromCompact(signature).toDERRawBytes();
-  }
-
-  const hashData = concatBytes(
-    serializeString(params.token),
-    serializeString(params.senderAddress),
-    serializeInt64(params.timestamp),
-    new Uint8Array([messageTypeByte]),
-    serializeVector(encryptedPayload)
-  );
-  const messageHashBytes = await doubleSha256(hashData);
-  const messageHash = bytesToHex(messageHashBytes.slice().reverse());
-
-  const serialized = concatBytes(
-    serializeString(params.token),
-    serializeString(params.senderAddress),
-    serializeInt64(params.timestamp),
-    new Uint8Array([messageTypeByte]),
-    serializeVector(encryptedPayload),
-    serializeVector(signature)
-  );
-
-  return {
-    hex: bytesToHex(serialized),
-    messageHash,
-    messageHashBytes: bytesToHex(messageHashBytes),
-    encryptedSize: encryptedPayload.length,
-    messageType: params.messageType
-  };
-}
-
-/**
- * wrapMessageForServer
- * Encrypts a serialized CDepinMessage hex for the server's public key.
- */
-async function wrapMessageForServer(messageHex, serverPubKeyHex, senderAddress) {
-  if (!messageHex || !serverPubKeyHex || !senderAddress) {
-    throw new Error('messageHex, serverPubKeyHex, and senderAddress are required');
-  }
-
-  const normalizedMsg = normalizeHex(messageHex);
-  const normalizedServerPk = normalizeHex(serverPubKeyHex);
-  
-  if (!normalizedMsg) throw new Error('Invalid messageHex');
-  if (!normalizedServerPk) throw new Error('Invalid serverPubKeyHex');
-
-  const serverPubKey = hexToBytes(normalizedServerPk);
-  
-  if (serverPubKey.length !== 33) {
-    throw new Error('Server public key must be 33 bytes compressed');
-  }
-
-  // ECIES encrypt specifically for the server's pool key.
-  // IMPORTANT: The server decrypts this and expects to find a HEX STRING string in the output
-  // (processed by IsHex() in the node).
-  // Therefore, we must encrypt the HEX STRING itself (as UTF-8 bytes), 
-  // NOT the raw binary bytes of the message.
-  const encoder = new TextEncoder();
-  const messageBytes = encoder.encode(normalizedMsg);
-
-  const eciesMsg = await eciesEncrypt(messageBytes, [serverPubKey]);
-  const serializedECIES = serializeEciesMessage(eciesMsg);
-
-  return {
-    sender: senderAddress,
-    encrypted: bytesToHex(serializedECIES)
-  };
-}
-
-/**
- * unwrapMessageFromServer
- * Decrypts a full privacy-wrapped response (serialized JSON array) from depinreceivemsg.
- */
-async function unwrapMessageFromServer(encryptedHex, recipientPrivateKeyWifOrHex) {
-    if (!encryptedHex || !recipientPrivateKeyWifOrHex) {
-        throw new Error('encryptedHex and recipientPrivateKey are required');
-    }
-
-    let privKeyHex = recipientPrivateKeyWifOrHex;
-    if (isWIF(privKeyHex)) {
-        privKeyHex = await wifToHex(privKeyHex);
-    }
-
-    const decrypted = await decryptDepinReceiveEncryptedPayload(encryptedHex, privKeyHex);
-    return decrypted; // Returns the JSON string containing the message array
-}
-
-// Export for browser (IIFE global)
+import { hexToBytes, bytesToHex, normalizeHex, concatBytes, timingSafeEqual } from './bytes.js';
+import { sha256, doubleSha256, ripemd160, hash160, kdfSha256 } from './hash.js';
+import { base58Decode, base58CheckDecode } from './base58.js';
+import { P2PKH_PREFIX, normalizeNetwork, decodeP2PKHAddress, pubKeyMatchesAddress } from './address.js';
+import {
+  isWIF, wifToHex, normalizePrivateKeyTo32Bytes,
+  parsePublicKey, derivePublicKeyForms, privateKeyMatchesPublicKey
+} from './keys.js';
+import {
+  _setDepinTestRng, eciesEncrypt, serializeEciesMessage, deserializeEciesMessage, eciesDecrypt
+} from './ecies.js';
+import {
+  MAX_DEPIN_RECIPIENTS, MAX_DEPIN_MESSAGE_SIZE, DEPIN_RECEIVE_MAX_LIMIT,
+  isPreAuthenticatedSentinel,
+  buildDepinMessage, buildDepinPreimage, assembleDepinMessage,
+  parseDepinMessage, verifyDepinReceivedMessage
+} from './message.js';
+import {
+  MAX_DEPIN_TOKEN_LENGTH,
+  validateDepinSectionToken, isDepinTokenInScope, getDepinTokenAncestors
+} from './scope.js';
+import {
+  decryptDepinReceiveEncryptedPayload, decryptDepinReceivedMessage,
+  validateAndDecryptDepinMessage, decodeDepinReceiveResponse,
+  wrapMessageForServer, unwrapMessageFromServer
+} from './receive.js';
+import {
+  resolveDepinRecipients, buildDepinMessageForPool,
+  parseDepinPoolInfo, getRemoteDepinPoolInfo, buildDepinMessageForRemotePool
+} from './resolve.js';
 
 export {
+  // Build / sign
   buildDepinMessage,
+  buildDepinPreimage,
+  assembleDepinMessage,
+
+  // Pure utilities
+  isDepinTokenInScope,
+  validateDepinSectionToken,
+  getDepinTokenAncestors,
+  parseDepinMessage,
+  verifyDepinReceivedMessage,
+  isPreAuthenticatedSentinel,
+
+  // Non-custodial reception
+  decodeDepinReceiveResponse,
+  decryptDepinReceivedMessage,
+  validateAndDecryptDepinMessage,
+  decryptDepinReceiveEncryptedPayload,
+
+  // Recipient resolution / assisted send (network injected)
+  resolveDepinRecipients,
+  buildDepinMessageForPool,
+  parseDepinPoolInfo,
+  getRemoteDepinPoolInfo,
+  buildDepinMessageForRemotePool,
+
+  // Transport privacy wrapper
   wrapMessageForServer,
   unwrapMessageFromServer,
-  decryptDepinReceiveEncryptedPayload,
-  wifToHex,
+
+  // Keys / addresses
   isWIF,
+  wifToHex,
+  normalizePrivateKeyTo32Bytes,
+  parsePublicKey,
+  derivePublicKeyForms,
+  privateKeyMatchesPublicKey,
+  decodeP2PKHAddress,
+  pubKeyMatchesAddress,
+  normalizeNetwork,
+  P2PKH_PREFIX,
+
+  // Byte / hash utilities
   hexToBytes,
   bytesToHex,
+  normalizeHex,
+  concatBytes,
+  timingSafeEqual,
   sha256,
   doubleSha256,
+  ripemd160,
   hash160,
-  base58Decode
+  kdfSha256,
+  base58Decode,
+  base58CheckDecode,
+
+  // ECIES primitives
+  eciesEncrypt,
+  serializeEciesMessage,
+  deserializeEciesMessage,
+  eciesDecrypt,
+
+  // Constants
+  MAX_DEPIN_RECIPIENTS,
+  MAX_DEPIN_MESSAGE_SIZE,
+  DEPIN_RECEIVE_MAX_LIMIT,
+  MAX_DEPIN_TOKEN_LENGTH,
+
+  // Test-only hook (deterministic RNG); never call in production
+  _setDepinTestRng
 };
 
 // Expose on globalThis (browser + Node) for the IIFE bundle.
@@ -845,18 +117,54 @@ if (typeof globalThis !== 'undefined') {
     buildDepinMessage,
     buildDepinPreimage,
     assembleDepinMessage,
+    isDepinTokenInScope,
+    validateDepinSectionToken,
+    getDepinTokenAncestors,
+    parseDepinMessage,
+    verifyDepinReceivedMessage,
+    isPreAuthenticatedSentinel,
+    decodeDepinReceiveResponse,
+    decryptDepinReceivedMessage,
+    validateAndDecryptDepinMessage,
+    decryptDepinReceiveEncryptedPayload,
+    resolveDepinRecipients,
+    buildDepinMessageForPool,
+    parseDepinPoolInfo,
+    getRemoteDepinPoolInfo,
+    buildDepinMessageForRemotePool,
     wrapMessageForServer,
     unwrapMessageFromServer,
-    decryptDepinReceiveEncryptedPayload,
     wifToHex,
     isWIF,
+    MAX_DEPIN_RECIPIENTS,
+    MAX_DEPIN_MESSAGE_SIZE,
+    DEPIN_RECEIVE_MAX_LIMIT,
+    MAX_DEPIN_TOKEN_LENGTH,
     utils: {
       hexToBytes,
       bytesToHex,
+      normalizeHex,
+      concatBytes,
+      timingSafeEqual,
       sha256,
       doubleSha256,
+      ripemd160,
       hash160,
-      base58Decode
+      kdfSha256,
+      base58Decode,
+      base58CheckDecode,
+      normalizePrivateKeyTo32Bytes,
+      parsePublicKey,
+      derivePublicKeyForms,
+      privateKeyMatchesPublicKey,
+      decodeP2PKHAddress,
+      pubKeyMatchesAddress,
+      normalizeNetwork,
+      P2PKH_PREFIX,
+      eciesEncrypt,
+      serializeEciesMessage,
+      deserializeEciesMessage,
+      eciesDecrypt
     }
   };
 }

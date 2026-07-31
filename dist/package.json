@@ -1,0 +1,4 @@
+{
+  "//": "The IIFE bundles (.js/.min.js) predate the package's type:module and must keep loading as scripts under require(); .mjs/.cjs are typed by extension.",
+  "type": "commonjs"
+}

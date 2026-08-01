@@ -98,9 +98,12 @@ async function main() {
   } else {
   execFileSync(NEURAID, [
     '-regtest', `-datadir=${datadir}`, '-daemon', '-server',
-    '-assetindex', '-pubkeyindex',
+    // -addressindex should not be needed, but Core gates pubkey-index
+    // ingestion behind (fAddressIndex || fSpentIndex) in ConnectBlock, so
+    // without it no revealed key is ever indexed (bug reported upstream).
+    '-assetindex', '-pubkeyindex', '-addressindex',
     '-depinmsg=1', `-depinmsgtoken=${ROOT}`, `-depinmsgport=${DEPIN_PORT}`,
-    '-depinmsgbind=127.0.0.1', '-depinmsgmaxusers=20',
+    '-depinmsgbind=0.0.0.0', '-depinmsgmaxusers=20',
     '-fallbackfee=0.001', '-txindex',
     // Regtest deployment timeouts are in the past; extend them so the asset
     // softforks can still lock in and activate.
@@ -176,13 +179,70 @@ async function main() {
 
     // 7. Distribute: sender+r1 hold the section, r2 holds the ROOT only
     // (ancestor union must still include it when sending to the section).
-    cli('transfer', SECTION, '1', sender);
-    cli('transfer', SECTION, '1', r1);
-    cli('transfer', ROOT, '1', r2);
-    mineBlocks(1, minerAddr);
+    // DePIN assets are soulbound: a transfer must spend AND re-output the
+    // owner token, and the wallet's `transfer` coin selection sweeps every
+    // UTXO of the asset (wiping earlier recipients), while
+    // `transferfromaddress` never attaches the owner token. The only way to
+    // fan out to several holders from one wallet is a single raw transaction
+    // with explicit inputs (asset UTXO + owner token + fee) and one output
+    // per recipient. Required output order: coin change, owner change, then
+    // the transfers.
+    const outpointOf = (asset) => {
+      const info = cli('listmyassets', asset, 'true')[asset];
+      if (!info || !info.outpoints || !info.outpoints.length) {
+        throw new Error('no outpoint found for ' + asset);
+      }
+      return info.outpoints[0];
+    };
+    const distributeAsset = (asset, recipients) => {
+      const assetOp = outpointOf(asset);
+      const ownerOp = outpointOf(asset + '!');
+      const feeUtxo = cli('listunspent', '1', '9999999')
+        .find(u => u.spendable && u.amount >= 1);
+      if (!feeUtxo) throw new Error('no XNA utxo for fees');
+
+      const total = recipients.length; // 1 unit each
+      const outputs = [
+        { [cli('getnewaddress')]: Number((feeUtxo.amount - 0.01).toFixed(8)) },
+        { [cli('getnewaddress')]: { transfer: { [asset + '!']: 1 } } },
+        ...recipients.map(to => ({ [to]: { transfer: { [asset]: 1 } } }))
+      ];
+      const change = assetOp.amount - total;
+      if (change > 0) {
+        outputs.push({ [cli('getnewaddress')]: { transfer: { [asset]: change } } });
+      }
+
+      const raw = cli('createrawtransaction',
+        JSON.stringify([
+          { txid: assetOp.txid, vout: assetOp.vout },
+          { txid: ownerOp.txid, vout: ownerOp.vout },
+          { txid: feeUtxo.txid, vout: feeUtxo.vout }
+        ]),
+        JSON.stringify(outputs));
+      let signed = cliRaw('signrawtransaction', raw);
+      if (!signed.ok) signed = cliRaw('signrawtransactionwithwallet', raw);
+      if (!signed.ok || !signed.result.complete) {
+        throw new Error('could not sign distribution tx for ' + asset);
+      }
+      cli('sendrawtransaction', signed.result.hex);
+      mineBlocks(1, minerAddr);
+    };
+    distributeAsset(SECTION, [sender, r1]);
+    distributeAsset(ROOT, [r2]);
+
+    for (const [asset, addr] of [[SECTION, sender], [SECTION, r1], [ROOT, r2]]) {
+      const holders = cli('listaddressesbyasset', asset);
+      if (!holders[addr]) {
+        throw new Error(addr + ' lost its ' + asset + ' balance: ' + JSON.stringify(holders));
+      }
+    }
 
     // 8. Recipient resolution fixtures
     const ancestorRecipients = cli('depingetancestorrecipients', SECTION, '21', ROOT);
+    if (ancestorRecipients.returned < 3) {
+      throw new Error('Expected sender+r1+r2 as recipients, got ' +
+        JSON.stringify(ancestorRecipients));
+    }
     const ancestorRecipientsDefault = cli('depingetancestorrecipients', SECTION);
     console.log('recipients:', ancestorRecipients.returned, 'truncated:', ancestorRecipients.truncated);
 
@@ -289,9 +349,11 @@ async function main() {
     const receiveR1PagedPlain = await unwrapOrPassthrough(receiveR1Paged, r1PrivHex);
     const receiveR2Plain = await unwrapOrPassthrough(receiveR2Root, r2PrivHex);
 
-    // 12. Gateway INFO line over TCP
+    // 12. Gateway INFO line over TCP. NEURAI_INFO_HOST overrides the target
+    // when the daemon runs elsewhere (e.g. inside a container).
+    const infoHost = process.env.NEURAI_INFO_HOST || '127.0.0.1';
     const infoLine = await new Promise((resolve, reject) => {
-      const sock = connect({ host: '127.0.0.1', port: DEPIN_PORT }, () => sock.write('INFO\n'));
+      const sock = connect({ host: infoHost, port: DEPIN_PORT }, () => sock.write('INFO\n'));
       let data = '';
       sock.on('data', d => {
         data += d.toString();

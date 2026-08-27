@@ -45,6 +45,9 @@ export function buildDepinMessage(params: BuildDepinMessageParams): Promise<Buil
 
 export interface BuildDepinPreimageResult {
   encryptedPayloadHex: string;
+  /** Exact 32-byte SHA256d digest that SignDigest must sign. */
+  messageDigest: Uint8Array;
+  messageDigestHex: string;
   messageType: MessageType;
   messageTypeByte: number;
   encryptedSize: number;
@@ -230,6 +233,20 @@ export function resolveDepinRecipients(
 
 export function buildDepinMessageForPool(
   params: ResolveDepinRecipientsParams & Omit<BuildDepinMessageParams, 'recipientPubKeys'>
+): Promise<BuildDepinMessageResult & { resolution: DepinRecipientsResolution }>;
+
+/** Non-custodial overload: recipient encryption stays local and the identity
+ * signs the exact digest returned by buildDepinPreimage. */
+export function buildDepinMessageForPool(
+  params: Omit<ResolveDepinRecipientsParams, 'senderPubKey'> &
+    Omit<BuildDepinMessageParams,
+      'recipientPubKeys' | 'privateKey' | 'senderAddress' | 'senderPubKey'> & {
+      identity: SenderIdentity;
+      network: Network;
+      senderAddress?: never;
+      senderPubKey?: never;
+      privateKey?: never;
+    }
 ): Promise<BuildDepinMessageResult & { resolution: DepinRecipientsResolution }>;
 
 /** Pure decoder for an already verified/decoded recipients body. */

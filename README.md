@@ -173,9 +173,11 @@ Purging is `clearDepinMessages` with an `admin` challenge (owner access);
 
 Provide an identity whose `signMessage` / `signDigest` / `openReply` are
 backed by the device. For one-off message assembly, `buildDepinPreimage`
-encrypts and returns the digest to sign and `assembleDepinMessage` combines
-it with the DER (or compact 64-byte) signature. The private key never touches
-the library.
+encrypts and returns `messageDigest` (the exact 32 bytes to sign) plus
+`messageDigestHex`; `assembleDepinMessage` combines it with the DER (or
+compact 64-byte) signature. `buildDepinMessageForPool({ identity, ... })`
+performs that sequence, invokes `signDigest` once and verifies the returned
+signature locally. The private key never touches the library.
 
 ## Utilities
 

@@ -334,6 +334,32 @@ test('decoders refuse unbranded objects — the brand cannot be faked from outsi
     openBoundReply({ ...fake, kind: 'bound', replyHex: V.challenge_encrypted }, V.holder_wif),
     DepinProtocolError
   );
+
+  const genuine = verifyDepinReply({
+    reply: infoReply(), method: 'depingetmsginfo', token: '&TEST',
+    poolPublicKey: V.pool_pubkey
+  });
+  assert.equal(Object.getOwnPropertySymbols(genuine).length, 0);
+  const clone = {
+    ...genuine,
+    replyHex: bytesToHex(new TextEncoder().encode('{"attacker":true}'))
+  };
+  assert.equal(isVerifiedDepinReply(clone), false);
+  assert.throws(() => decodePlainReply(clone), DepinProtocolError);
+});
+
+test('Protocol 2 rejects uncompressed signature headers and oversized poolsig before recovery', () => {
+  const uncompressedHeader = base64Decode(V.info_poolsig);
+  uncompressedHeader[0] -= 4; // 31..34 -> 27..30, same r/s and recovery id
+  assert.throws(() => verifyDepinReply({
+    reply: { body: V.info_body, poolsig: base64Encode(uncompressedHeader) },
+    method: 'depingetmsginfo', token: '&TEST', poolPublicKey: V.pool_pubkey
+  }), /compressed key/);
+
+  assert.throws(() => verifyDepinReply({
+    reply: { body: V.info_body, poolsig: 'A'.repeat(1024 * 1024) },
+    method: 'depingetmsginfo', token: '&TEST', poolPublicKey: V.pool_pubkey
+  }), /exactly 88/);
 });
 
 test('preimage builder rejects ambiguous components', () => {

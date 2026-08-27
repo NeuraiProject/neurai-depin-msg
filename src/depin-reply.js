@@ -23,7 +23,10 @@ import { parsePublicKey, normalizePrivateKeyTo32Bytes } from './keys.js';
 import { decodeP2PKHAddress } from './address.js';
 import { validateDepinSectionToken } from './scope.js';
 import { deserializeEciesMessage, eciesDecrypt } from './ecies.js';
-import { recoverPublicKeyFromMessage } from './signmessage.js';
+import {
+  base64Decode,
+  recoverPublicKeyFromMessage
+} from './signmessage.js';
 import {
   DepinProtocolError,
   DepinReplyAuthenticationError,
@@ -38,10 +41,12 @@ import {
 const MAX_REPLY_HEX_CHARS = 32 * 1024 * 1024;
 const MAX_DECODED_JSON_BYTES = 16 * 1024 * 1024;
 
-const VERIFIED_REPLY_BRAND = Symbol('neurai.depin.verifiedReply');
+// Runtime capability, not a structural/type-only brand. A WeakSet cannot be
+// recovered from a genuine object and copied onto attacker-controlled data.
+const VERIFIED_REPLIES = new WeakSet();
 
 function isVerifiedDepinReply(value) {
-  return Boolean(value) && typeof value === 'object' && value[VERIFIED_REPLY_BRAND] === true;
+  return Boolean(value) && typeof value === 'object' && VERIFIED_REPLIES.has(value);
 }
 
 function sha256HexOfAscii(str) {
@@ -94,6 +99,25 @@ function validateReplyShape(reply) {
   if (typeof reply.poolsig !== 'string' || reply.poolsig.length === 0) {
     throw new DepinProtocolError('DePIN reply is missing poolsig');
   }
+  // Compact signatures are always 65 bytes -> 88 canonical Base64 chars.
+  // Check before decoding so an untrusted RPC cannot trigger a large
+  // allocation through a deliberately oversized poolsig.
+  if (reply.poolsig.length !== 88) {
+    throw new DepinProtocolError('poolsig must be exactly 88 Base64 characters');
+  }
+  let compactSignature;
+  try {
+    compactSignature = base64Decode(reply.poolsig);
+  } catch (e) {
+    throw new DepinProtocolError('poolsig must be canonical Base64', e);
+  }
+  if (compactSignature.length !== 65) {
+    throw new DepinProtocolError('poolsig must decode to exactly 65 bytes');
+  }
+  // Protocol 2 only uses compressed signmessage keys (headers 31..34).
+  if (compactSignature[0] < 31 || compactSignature[0] > 34) {
+    throw new DepinProtocolError('poolsig must declare a compressed key (header 31..34)');
+  }
   const replyHex = hasBody ? reply.body : reply.encrypted;
   if (replyHex.length === 0 || replyHex.length > MAX_REPLY_HEX_CHARS) {
     throw new DepinProtocolError('DePIN reply hex is empty or exceeds the size limit');
@@ -116,6 +140,9 @@ function verifyDepinReply({ reply, method, token = '', address = '', challenge =
     throw new DepinProtocolError('poolPublicKey is required to verify a DePIN reply');
   }
   const expected = parsePublicKey(poolPublicKey);
+  if (expected.bytes.length !== 33) {
+    throw new DepinProtocolError('poolPublicKey must be a compressed 33-byte SEC1 key');
+  }
   const preimage = buildDepinReplyPreimage({ method, token, address, challenge, replyHex });
 
   let recovered;
@@ -132,8 +159,7 @@ function verifyDepinReply({ reply, method, token = '', address = '', challenge =
     );
   }
 
-  return Object.freeze({
-    [VERIFIED_REPLY_BRAND]: true,
+  const verifiedReply = {
     kind,
     replyHex,
     method,
@@ -141,7 +167,9 @@ function verifyDepinReply({ reply, method, token = '', address = '', challenge =
     address,
     challenge,
     poolPublicKey: expected.pointId
-  });
+  };
+  VERIFIED_REPLIES.add(verifiedReply);
+  return Object.freeze(verifiedReply);
 }
 
 function parseJsonBytes(bytes, context) {

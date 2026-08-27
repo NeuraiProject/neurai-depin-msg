@@ -78,16 +78,25 @@ if (m.isPreAuthenticatedSentinel !== undefined) process.exit(1);
   run(process.execPath, ['runtime.mjs'], consumerDirectory);
   run(process.execPath, ['runtime.cjs'], consumerDirectory);
 
-  // 3. IIFE in a scope without Node globals (browser/RN shape): shadow
-  // Buffer/require/process/module; crypto must exist (browsers/RN have it).
+  // 3. IIFE in an isolated realm without Node globals. Merely shadowing
+  // lexical names is insufficient because globalThis.Buffer/process would
+  // still expose Node to the bundle.
   writeFileSync(join(consumerDirectory, 'iife-probe.cjs'), `
 const { readFileSync } = require('node:fs');
+const { createContext, runInContext } = require('node:vm');
+const { webcrypto } = require('node:crypto');
+const { TextEncoder, TextDecoder } = require('node:util');
 const source = readFileSync(
   require.resolve('@neuraiproject/neurai-depin-msg/dist/neurai-depin-msg.min.js'), 'utf8');
-const sandboxRunner = new Function(
-  'Buffer', 'require', 'process', 'module', 'exports', source +
-  '; return globalThis.neuraiDepinMsg;');
-const api = sandboxRunner(undefined, undefined, undefined, undefined, undefined);
+const sandbox = createContext({ crypto: webcrypto, TextEncoder, TextDecoder });
+runInContext(source, sandbox, { timeout: 5000 });
+for (const nodeGlobal of ['Buffer', 'require', 'process', 'module', 'exports']) {
+  if (nodeGlobal in sandbox) {
+    console.error('isolated IIFE realm unexpectedly exposes ' + nodeGlobal);
+    process.exit(1);
+  }
+}
+const api = sandbox.neuraiDepinMsg;
 if (!api || typeof api.signRecoverableMessage !== 'function') {
   console.error('IIFE did not expose the API without Node globals');
   process.exit(1);
@@ -110,7 +119,8 @@ if (api.parseDepinPoolInfo !== undefined || api.isPreAuthenticatedSentinel !== u
 import {
   createSoftwareIdentity, requestDepinChallenge, receiveDepinMessages,
   getDepinPoolInfo, submitDepinMessage, verifyDepinReply, openBoundReply,
-  signRecoverableMessage, decodeWIF,
+  signRecoverableMessage, decodeWIF, buildDepinPreimage,
+  buildDepinMessageForPool,
   type DepinRpc, type PoolTrust, type PoolPin, type SenderIdentity,
   type VerifiedDepinReply, type ReceiveMessagesResult
 } from '@neuraiproject/neurai-depin-msg';
@@ -122,6 +132,13 @@ async function usage(): Promise<void> {
   const identity: SenderIdentity = await createSoftwareIdentity({
     privateKey: '11'.repeat(32), network: 'test'
   });
+  const preimage = await buildDepinPreimage({
+    token: '&TEST', senderAddress: identity.address,
+    senderPubKey: identity.publicKey, message: 'x', messageType: 'group',
+    recipientPubKeys: [identity.publicKey], timestamp: 1, network: 'test'
+  });
+  const digest: Uint8Array = preimage.messageDigest;
+  const digestHex: string = preimage.messageDigestHex;
   const poolInfo = await getDepinPoolInfo({ rpc, serviceId: 'svc', trust });
   const pin: PoolPin = poolInfo.pin;
   const c = await requestDepinChallenge({
@@ -137,9 +154,14 @@ async function usage(): Promise<void> {
   });
   await openBoundReply(verified, identity.openReply);
   await submitDepinMessage({ rpc, identity, messageHex: '00', poolPublicKey: pin.poolPublicKey });
+  await buildDepinMessageForPool({
+    rpc, identity, token: pin.poolRoot, poolRoot: pin.poolRoot,
+    poolPublicKey: pin.poolPublicKey, maxRecipients: 20,
+    message: 'x', messageType: 'group', timestamp: 1, network: 'test'
+  });
   const sig: string = signRecoverableMessage('x', '11'.repeat(32));
   const wif = decodeWIF('cW8vy4nJbZZ4W4L8CsRZp22h3WeWrCXgNwrm1264wW8VAmzHMuJ4');
-  void [r, sig, wif.compressed];
+  void [r, sig, wif.compressed, digest, digestHex];
 }
 void usage;
 `);

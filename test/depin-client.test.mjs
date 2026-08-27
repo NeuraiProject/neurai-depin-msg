@@ -223,6 +223,78 @@ test('buildDepinMessageForPool resolves through the envelope and builds a decryp
   );
 });
 
+test('buildDepinMessageForPool uses an external signDigest exactly once', async () => {
+  const body = await holdersResponse();
+  const { rpc, calls } = mockRpc(() =>
+    plainReply('depingetancestorrecipients', '&POOL/NEWS', body)
+  );
+  const software = await createSoftwareIdentity({
+    privateKey: sender.privHex, network: 'test'
+  });
+  const digests = [];
+  const identity = {
+    ...software,
+    signDigest: (digest) => {
+      digests.push(digest.slice());
+      return software.signDigest(digest);
+    }
+  };
+  const out = await buildDepinMessageForPool({
+    rpc,
+    token: '&POOL/NEWS', poolRoot: '&POOL', maxRecipients: 3,
+    poolPublicKey: POOL.pubCompressed, network: 'test', identity,
+    message: 'hardware build', messageType: 'group', timestamp: 1753900001
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(digests.length, 1);
+  assert.equal(digests[0].length, 32);
+  const parsed = await parseDepinMessage(out.hex);
+  assert.equal(parsed.hashBytes, bytesToHex(digests[0]));
+  assert.equal(
+    await decryptDepinReceiveEncryptedPayload(parsed.encryptedPayloadHex, C.privHex),
+    'hardware build'
+  );
+});
+
+test('identity publishing rejects missing capability or a wrong signature', async () => {
+  const body = await holdersResponse();
+  const noRpc = mockRpc(() => { throw new Error('must not be called'); });
+  await assert.rejects(buildDepinMessageForPool({
+    rpc: noRpc.rpc,
+    token: '&POOL/NEWS', poolRoot: '&POOL', maxRecipients: 3,
+    poolPublicKey: POOL.pubCompressed, network: 'test',
+    identity: { address: await addressFor(sender.pub), publicKey: sender.pub },
+    message: 'x', messageType: 'group', timestamp: 1753900001
+  }), DepinCapabilityError);
+  assert.equal(noRpc.calls.length, 0);
+
+  const wrongSigner = await createSoftwareIdentity({
+    privateKey: B.privHex, network: 'test'
+  });
+  const senderIdentity = await createSoftwareIdentity({
+    privateKey: sender.privHex, network: 'test'
+  });
+  await assert.rejects(buildDepinMessageForPool({
+    rpc: noRpc.rpc,
+    token: '&POOL/NEWS', poolRoot: '&POOL', maxRecipients: 3,
+    poolPublicKey: POOL.pubCompressed, network: 'test',
+    identity: { ...senderIdentity, address: await addressFor(B.pubCompressed) },
+    message: 'x', messageType: 'group', timestamp: 1753900001
+  }), /does not correspond/);
+  assert.equal(noRpc.calls.length, 0);
+
+  const withRpc = mockRpc(() =>
+    plainReply('depingetancestorrecipients', '&POOL/NEWS', body)
+  );
+  await assert.rejects(buildDepinMessageForPool({
+    rpc: withRpc.rpc,
+    token: '&POOL/NEWS', poolRoot: '&POOL', maxRecipients: 3,
+    poolPublicKey: POOL.pubCompressed, network: 'test',
+    identity: { ...senderIdentity, signDigest: wrongSigner.signDigest },
+    message: 'x', messageType: 'group', timestamp: 1753900001
+  }), /does not verify/);
+});
+
 // ---------------------------------------------------------------------------
 // Pool info (§6.4)
 // ---------------------------------------------------------------------------

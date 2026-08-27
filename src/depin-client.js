@@ -28,7 +28,14 @@ import {
 } from './depin-reply.js';
 import { assertIdentityCapabilities } from './identity.js';
 import { wrapMessageForServer, decodeDepinReceiveResponse } from './receive.js';
-import { parseDepinMessage, buildDepinMessage, MAX_DEPIN_RECIPIENTS } from './message.js';
+import {
+  parseDepinMessage,
+  buildDepinMessage,
+  buildDepinPreimage,
+  assembleDepinMessage,
+  verifyDepinReceivedMessage,
+  MAX_DEPIN_RECIPIENTS
+} from './message.js';
 import { DepinProtocolError } from './errors.js';
 
 const CHALLENGE_HEX = /^[0-9a-f]{64}$/;
@@ -258,19 +265,95 @@ async function resolveDepinRecipients(params) {
 
 /**
  * Resolves recipients against the pool and builds the encrypted, signed
- * message in one step (verified envelope included). Takes
- * resolveDepinRecipients params plus every buildDepinMessage param.
+ * message in one step (verified envelope included). The legacy local-key
+ * form accepts `privateKey`; the non-custodial form accepts `identity` and
+ * invokes its `signDigest` capability exactly once with the canonical digest.
  */
 async function buildDepinMessageForPool(params) {
-  const { rpc, token, poolRoot, maxRecipients, poolPublicKey, network, ...buildParams } = params;
+  const {
+    rpc, token, poolRoot, maxRecipients, poolPublicKey, network,
+    identity = null, ...buildParams
+  } = params;
+
+  let senderPubKey = buildParams.senderPubKey;
+  let senderAddress = buildParams.senderAddress;
+  if (identity !== null) {
+    assertIdentityCapabilities(identity, ['signDigest']);
+    if (!network) {
+      throw new DepinProtocolError('network is required for identity-based publishing');
+    }
+    if (typeof identity.publicKey !== 'string' || identity.publicKey.length === 0) {
+      throw new DepinProtocolError('identity.publicKey is required to publish a message');
+    }
+    const identityKey = parsePublicKey(identity.publicKey);
+    if (identityKey.bytes.length !== 33) {
+      throw new DepinProtocolError('identity.publicKey must be a compressed 33-byte SEC1 key');
+    }
+    const { payload: identityAddressHash } = await decodeP2PKHAddress(identity.address, network);
+    const identityKeyHash = await hash160(identityKey.bytes);
+    if (!timingSafeEqual(identityAddressHash, identityKeyHash)) {
+      throw new DepinProtocolError('identity.publicKey does not correspond to identity.address');
+    }
+    if (buildParams.privateKey !== undefined) {
+      throw new DepinProtocolError('Provide either identity or privateKey, not both');
+    }
+    if (senderPubKey !== undefined &&
+        parsePublicKey(senderPubKey).pointId !== identityKey.pointId) {
+      throw new DepinProtocolError('senderPubKey does not match identity.publicKey');
+    }
+    if (senderAddress !== undefined && senderAddress !== identity.address) {
+      throw new DepinProtocolError('senderAddress does not match identity.address');
+    }
+    senderPubKey = identity.publicKey;
+    senderAddress = identity.address;
+  }
+
   const resolution = await resolveDepinRecipients({
     rpc, token, poolRoot, maxRecipients, poolPublicKey, network,
-    senderPubKey: buildParams.senderPubKey
+    senderPubKey
   });
+
+  if (identity !== null) {
+    const preimage = await buildDepinPreimage({
+      ...buildParams,
+      network,
+      token,
+      senderAddress,
+      senderPubKey,
+      recipientPubKeys: resolution.recipientPubKeys
+    });
+    // Give the device its own copy: a callback cannot mutate the value kept
+    // in the preimage result or affect assembly.
+    const signature = await identity.signDigest(preimage.messageDigest.slice());
+    const built = await assembleDepinMessage({
+      token,
+      senderAddress,
+      timestamp: buildParams.timestamp,
+      messageType: preimage.messageType,
+      encryptedPayloadHex: preimage.encryptedPayloadHex
+    }, signature);
+
+    // External devices are untrusted capabilities too: fail locally before
+    // submit if they returned a signature for another digest/key.
+    const parsed = await parseDepinMessage(built.hex);
+    const verification = await verifyDepinReceivedMessage(parsed, {
+      network,
+      senderPubKey
+    });
+    if (!verification.signatureValid) {
+      throw new DepinProtocolError(
+        'signDigest returned a signature that does not verify for identity.publicKey'
+      );
+    }
+    return { ...built, recipientCount: preimage.recipientCount, resolution };
+  }
+
   const built = await buildDepinMessage({
     ...buildParams,
     network,
     token,
+    senderAddress,
+    senderPubKey,
     recipientPubKeys: resolution.recipientPubKeys
   });
   return { ...built, resolution };

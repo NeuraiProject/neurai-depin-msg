@@ -38,6 +38,13 @@ test('hex utilities behave as before (plus stricter validation)', () => {
   assert.throws(() => lib.hexToBytes('zz'));
 });
 
+test('base58Encode handles empty and all-zero byte strings canonically', () => {
+  assert.equal(lib.base58Encode(new Uint8Array()), '');
+  assert.equal(lib.base58Encode(new Uint8Array([0])), '1');
+  assert.equal(lib.base58Encode(new Uint8Array([0, 0])), '11');
+  assert.equal(lib.base58Encode(new Uint8Array([0, 1])), '12');
+});
+
 test('WIF detection covers all Neurai prefixes', () => {
   // mainnet compressed (K/L), mainnet uncompressed (5),
   // testnet compressed (c), testnet uncompressed (9)

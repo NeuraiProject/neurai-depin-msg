@@ -190,10 +190,10 @@ async function buildDepinMessage(params) {
  * The signature-less half of buildDepinMessage, for external signers (hardware
  * wallets that never expose the private key). ECIES-encrypts the message for
  * the recipients (the sender is auto-included) and returns the
- * `encryptedPayload` hex plus the fields needed to sign. The signer feeds
- * token / senderAddress / timestamp / messageTypeByte / encryptedPayload to
- * the device, then passes the returned DER signature to
- * {@link assembleDepinMessage}. No private key.
+ * `encryptedPayload` plus the exact canonical digest to sign. The caller
+ * passes `messageDigest` directly to its SignDigest capability, then passes
+ * the returned DER/compact signature to {@link assembleDepinMessage}. The
+ * external signer never has to reproduce Core's serialization itself.
  */
 async function buildDepinPreimage(params) {
   const { messageType, recipientKeyBytes } = await prepareBuildInputs(params);
@@ -201,9 +201,19 @@ async function buildDepinPreimage(params) {
   const messageBytes = new TextEncoder().encode(params.message);
   const eciesMsg = await eciesEncrypt(messageBytes, recipientKeyBytes);
   const encryptedPayload = serializeEciesMessage(eciesMsg);
+  const fields = {
+    token: params.token,
+    senderAddress: params.senderAddress,
+    timestamp: params.timestamp,
+    messageTypeByte: messageType.byte,
+    encryptedPayload
+  };
+  const messageDigest = await computeDepinMessageHashBytes(fields);
 
   return {
     encryptedPayloadHex: bytesToHex(encryptedPayload),
+    messageDigest: messageDigest.slice(),
+    messageDigestHex: bytesToHex(messageDigest),
     messageType: messageType.str,
     messageTypeByte: messageType.byte,
     encryptedSize: encryptedPayload.length,

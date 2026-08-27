@@ -1,7 +1,11 @@
 /config.json
 # Logs
 docker
-tmp
+# Scratch plans/results stay local, but the opt-in protocol-2 E2E and smoke
+# runners are versioned so release validation remains reproducible.
+tmp/*
+!tmp/e2e-regtest-3.0.0.mjs
+!tmp/smoke-testnet-3.0.0.mjs
 logs
 *.log
 npm-debug.log*

@@ -9,8 +9,15 @@ const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvw
 
 function base58Encode(bytes) {
   if (!(bytes instanceof Uint8Array)) throw new Error('base58Encode expects Uint8Array');
+  if (bytes.length === 0) return '';
+
+  let leadingZeroes = 0;
+  while (leadingZeroes < bytes.length && bytes[leadingZeroes] === 0) leadingZeroes++;
+  if (leadingZeroes === bytes.length) return '1'.repeat(leadingZeroes);
+
   const digits = [0];
-  for (const byte of bytes) {
+  for (let i = leadingZeroes; i < bytes.length; i++) {
+    const byte = bytes[i];
     let carry = byte;
     for (let j = 0; j < digits.length; j++) {
       carry += digits[j] << 8;
@@ -22,11 +29,7 @@ function base58Encode(bytes) {
       carry = (carry / 58) | 0;
     }
   }
-  let out = '';
-  for (const byte of bytes) {
-    if (byte !== 0) break;
-    out += '1';
-  }
+  let out = '1'.repeat(leadingZeroes);
   for (let i = digits.length - 1; i >= 0; i--) out += BASE58_ALPHABET[digits[i]];
   return out;
 }

@@ -139,6 +139,8 @@ test('preimage + assemble equals direct build', async () => {
     serializeVector(hexToBytes(pre.encryptedPayloadHex))
   );
   const hash = await doubleSha256(preimage);
+  assert.deepEqual(pre.messageDigest, hash);
+  assert.equal(pre.messageDigestHex, bytesToHex(hash));
   const der = secp256k1.sign(hash, sender.priv).toDERRawBytes();
 
   const assembled = await assembleDepinMessage({

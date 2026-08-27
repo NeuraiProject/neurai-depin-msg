@@ -711,8 +711,13 @@ var neuraiDepinMsg = (() => {
   var BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
   function base58Encode(bytes) {
     if (!(bytes instanceof Uint8Array)) throw new Error("base58Encode expects Uint8Array");
+    if (bytes.length === 0) return "";
+    let leadingZeroes = 0;
+    while (leadingZeroes < bytes.length && bytes[leadingZeroes] === 0) leadingZeroes++;
+    if (leadingZeroes === bytes.length) return "1".repeat(leadingZeroes);
     const digits = [0];
-    for (const byte of bytes) {
+    for (let i = leadingZeroes; i < bytes.length; i++) {
+      const byte = bytes[i];
       let carry = byte;
       for (let j = 0; j < digits.length; j++) {
         carry += digits[j] << 8;
@@ -724,11 +729,7 @@ var neuraiDepinMsg = (() => {
         carry = carry / 58 | 0;
       }
     }
-    let out = "";
-    for (const byte of bytes) {
-      if (byte !== 0) break;
-      out += "1";
-    }
+    let out = "1".repeat(leadingZeroes);
     for (let i = digits.length - 1; i >= 0; i--) out += BASE58_ALPHABET[digits[i]];
     return out;
   }
@@ -3786,8 +3787,18 @@ var neuraiDepinMsg = (() => {
     const messageBytes = new TextEncoder().encode(params.message);
     const eciesMsg = await eciesEncrypt(messageBytes, recipientKeyBytes);
     const encryptedPayload = serializeEciesMessage(eciesMsg);
+    const fields = {
+      token: params.token,
+      senderAddress: params.senderAddress,
+      timestamp: params.timestamp,
+      messageTypeByte: messageType.byte,
+      encryptedPayload
+    };
+    const messageDigest = await computeDepinMessageHashBytes(fields);
     return {
       encryptedPayloadHex: bytesToHex(encryptedPayload),
+      messageDigest: messageDigest.slice(),
+      messageDigestHex: bytesToHex(messageDigest),
       messageType: messageType.str,
       messageTypeByte: messageType.byte,
       encryptedSize: encryptedPayload.length,
@@ -4450,9 +4461,9 @@ var neuraiDepinMsg = (() => {
   // src/depin-reply.js
   var MAX_REPLY_HEX_CHARS = 32 * 1024 * 1024;
   var MAX_DECODED_JSON_BYTES = 16 * 1024 * 1024;
-  var VERIFIED_REPLY_BRAND = /* @__PURE__ */ Symbol("neurai.depin.verifiedReply");
+  var VERIFIED_REPLIES = /* @__PURE__ */ new WeakSet();
   function isVerifiedDepinReply(value) {
-    return Boolean(value) && typeof value === "object" && value[VERIFIED_REPLY_BRAND] === true;
+    return Boolean(value) && typeof value === "object" && VERIFIED_REPLIES.has(value);
   }
   function sha256HexOfAscii(str) {
     return bytesToHex(sha2562(new TextEncoder().encode(str)));
@@ -4493,6 +4504,21 @@ var neuraiDepinMsg = (() => {
     if (typeof reply.poolsig !== "string" || reply.poolsig.length === 0) {
       throw new DepinProtocolError("DePIN reply is missing poolsig");
     }
+    if (reply.poolsig.length !== 88) {
+      throw new DepinProtocolError("poolsig must be exactly 88 Base64 characters");
+    }
+    let compactSignature;
+    try {
+      compactSignature = base64Decode(reply.poolsig);
+    } catch (e) {
+      throw new DepinProtocolError("poolsig must be canonical Base64", e);
+    }
+    if (compactSignature.length !== 65) {
+      throw new DepinProtocolError("poolsig must decode to exactly 65 bytes");
+    }
+    if (compactSignature[0] < 31 || compactSignature[0] > 34) {
+      throw new DepinProtocolError("poolsig must declare a compressed key (header 31..34)");
+    }
     const replyHex = hasBody ? reply.body : reply.encrypted;
     if (replyHex.length === 0 || replyHex.length > MAX_REPLY_HEX_CHARS) {
       throw new DepinProtocolError("DePIN reply hex is empty or exceeds the size limit");
@@ -4508,6 +4534,9 @@ var neuraiDepinMsg = (() => {
       throw new DepinProtocolError("poolPublicKey is required to verify a DePIN reply");
     }
     const expected = parsePublicKey(poolPublicKey);
+    if (expected.bytes.length !== 33) {
+      throw new DepinProtocolError("poolPublicKey must be a compressed 33-byte SEC1 key");
+    }
     const preimage = buildDepinReplyPreimage({ method, token, address, challenge, replyHex });
     let recovered;
     try {
@@ -4523,8 +4552,7 @@ var neuraiDepinMsg = (() => {
         "poolsig for " + method + " does not verify against the pinned pool key"
       );
     }
-    return Object.freeze({
-      [VERIFIED_REPLY_BRAND]: true,
+    const verifiedReply = {
       kind,
       replyHex,
       method,
@@ -4532,7 +4560,9 @@ var neuraiDepinMsg = (() => {
       address,
       challenge,
       poolPublicKey: expected.pointId
-    });
+    };
+    VERIFIED_REPLIES.add(verifiedReply);
+    return Object.freeze(verifiedReply);
   }
   function parseJsonBytes(bytes, context) {
     if (bytes.length > MAX_DECODED_JSON_BYTES) {
@@ -4989,7 +5019,47 @@ var neuraiDepinMsg = (() => {
     return decodeDepinRecipients(body, { token, poolRoot, maxRecipients, senderPubKey, network });
   }
   async function buildDepinMessageForPool(params) {
-    const { rpc, token, poolRoot, maxRecipients, poolPublicKey, network, ...buildParams } = params;
+    const {
+      rpc,
+      token,
+      poolRoot,
+      maxRecipients,
+      poolPublicKey,
+      network,
+      identity = null,
+      ...buildParams
+    } = params;
+    let senderPubKey = buildParams.senderPubKey;
+    let senderAddress = buildParams.senderAddress;
+    if (identity !== null) {
+      assertIdentityCapabilities(identity, ["signDigest"]);
+      if (!network) {
+        throw new DepinProtocolError("network is required for identity-based publishing");
+      }
+      if (typeof identity.publicKey !== "string" || identity.publicKey.length === 0) {
+        throw new DepinProtocolError("identity.publicKey is required to publish a message");
+      }
+      const identityKey = parsePublicKey(identity.publicKey);
+      if (identityKey.bytes.length !== 33) {
+        throw new DepinProtocolError("identity.publicKey must be a compressed 33-byte SEC1 key");
+      }
+      const { payload: identityAddressHash } = await decodeP2PKHAddress(identity.address, network);
+      const identityKeyHash = await hash160(identityKey.bytes);
+      if (!timingSafeEqual(identityAddressHash, identityKeyHash)) {
+        throw new DepinProtocolError("identity.publicKey does not correspond to identity.address");
+      }
+      if (buildParams.privateKey !== void 0) {
+        throw new DepinProtocolError("Provide either identity or privateKey, not both");
+      }
+      if (senderPubKey !== void 0 && parsePublicKey(senderPubKey).pointId !== identityKey.pointId) {
+        throw new DepinProtocolError("senderPubKey does not match identity.publicKey");
+      }
+      if (senderAddress !== void 0 && senderAddress !== identity.address) {
+        throw new DepinProtocolError("senderAddress does not match identity.address");
+      }
+      senderPubKey = identity.publicKey;
+      senderAddress = identity.address;
+    }
     const resolution = await resolveDepinRecipients({
       rpc,
       token,
@@ -4997,12 +5067,43 @@ var neuraiDepinMsg = (() => {
       maxRecipients,
       poolPublicKey,
       network,
-      senderPubKey: buildParams.senderPubKey
+      senderPubKey
     });
+    if (identity !== null) {
+      const preimage = await buildDepinPreimage({
+        ...buildParams,
+        network,
+        token,
+        senderAddress,
+        senderPubKey,
+        recipientPubKeys: resolution.recipientPubKeys
+      });
+      const signature = await identity.signDigest(preimage.messageDigest.slice());
+      const built2 = await assembleDepinMessage({
+        token,
+        senderAddress,
+        timestamp: buildParams.timestamp,
+        messageType: preimage.messageType,
+        encryptedPayloadHex: preimage.encryptedPayloadHex
+      }, signature);
+      const parsed = await parseDepinMessage(built2.hex);
+      const verification = await verifyDepinReceivedMessage(parsed, {
+        network,
+        senderPubKey
+      });
+      if (!verification.signatureValid) {
+        throw new DepinProtocolError(
+          "signDigest returned a signature that does not verify for identity.publicKey"
+        );
+      }
+      return { ...built2, recipientCount: preimage.recipientCount, resolution };
+    }
     const built = await buildDepinMessage({
       ...buildParams,
       network,
       token,
+      senderAddress,
+      senderPubKey,
       recipientPubKeys: resolution.recipientPubKeys
     });
     return { ...built, resolution };

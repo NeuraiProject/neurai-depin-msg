@@ -21,22 +21,45 @@ var neuraiDepinMsg = (() => {
   var index_exports = {};
   __export(index_exports, {
     DEPIN_RECEIVE_MAX_LIMIT: () => DEPIN_RECEIVE_MAX_LIMIT,
+    DepinCapabilityError: () => DepinCapabilityError,
+    DepinError: () => DepinError,
+    DepinProtocolError: () => DepinProtocolError,
+    DepinReplyAuthenticationError: () => DepinReplyAuthenticationError,
+    DepinReplyDecryptionError: () => DepinReplyDecryptionError,
     MAX_DEPIN_MESSAGE_SIZE: () => MAX_DEPIN_MESSAGE_SIZE,
     MAX_DEPIN_RECIPIENTS: () => MAX_DEPIN_RECIPIENTS,
     MAX_DEPIN_TOKEN_LENGTH: () => MAX_DEPIN_TOKEN_LENGTH,
+    NEURAI_MESSAGE_MAGIC: () => NEURAI_MESSAGE_MAGIC,
     P2PKH_PREFIX: () => P2PKH_PREFIX,
+    PoolPinMismatchError: () => PoolPinMismatchError,
     _setDepinTestRng: () => _setDepinTestRng,
     assembleDepinMessage: () => assembleDepinMessage,
+    assertIdentityCapabilities: () => assertIdentityCapabilities,
     base58CheckDecode: () => base58CheckDecode,
+    base58CheckEncode: () => base58CheckEncode,
     base58Decode: () => base58Decode,
+    base58Encode: () => base58Encode,
+    base64Decode: () => base64Decode,
+    base64Encode: () => base64Encode,
+    buildDepinClearPreimage: () => buildDepinClearPreimage,
+    buildDepinGetPreimage: () => buildDepinGetPreimage,
     buildDepinMessage: () => buildDepinMessage,
     buildDepinMessageForPool: () => buildDepinMessageForPool,
-    buildDepinMessageForRemotePool: () => buildDepinMessageForRemotePool,
     buildDepinPreimage: () => buildDepinPreimage,
+    buildDepinReplyPreimage: () => buildDepinReplyPreimage,
+    buildDepinRequestPreimage: () => buildDepinRequestPreimage,
     bytesToHex: () => bytesToHex,
+    clearDepinMessages: () => clearDepinMessages,
     concatBytes: () => concatBytes,
+    createSoftwareIdentity: () => createSoftwareIdentity,
+    decodeChallengeResult: () => decodeChallengeResult,
+    decodeDepinPoolInfo: () => decodeDepinPoolInfo,
     decodeDepinReceiveResponse: () => decodeDepinReceiveResponse,
+    decodeDepinRecipients: () => decodeDepinRecipients,
     decodeP2PKHAddress: () => decodeP2PKHAddress,
+    decodePlainReply: () => decodePlainReply,
+    decodeSubmitResult: () => decodeSubmitResult,
+    decodeWIF: () => decodeWIF,
     decryptDepinReceiveEncryptedPayload: () => decryptDepinReceiveEncryptedPayload,
     decryptDepinReceivedMessage: () => decryptDepinReceivedMessage,
     derivePublicKeyForms: () => derivePublicKeyForms,
@@ -44,31 +67,42 @@ var neuraiDepinMsg = (() => {
     doubleSha256: () => doubleSha256,
     eciesDecrypt: () => eciesDecrypt,
     eciesEncrypt: () => eciesEncrypt,
+    getDepinPoolInfo: () => getDepinPoolInfo,
     getDepinTokenAncestors: () => getDepinTokenAncestors,
-    getRemoteDepinPoolInfo: () => getRemoteDepinPoolInfo,
     hash160: () => hash160,
     hexToBytes: () => hexToBytes,
     isDepinTokenInScope: () => isDepinTokenInScope,
-    isPreAuthenticatedSentinel: () => isPreAuthenticatedSentinel,
+    isVerifiedDepinReply: () => isVerifiedDepinReply,
     isWIF: () => isWIF,
     kdfSha256: () => kdfSha256,
+    listDepinSectionsPrivate: () => listDepinSectionsPrivate,
+    listDepinSectionsPublic: () => listDepinSectionsPublic,
+    neuraiSignedMessageHash: () => neuraiSignedMessageHash,
     normalizeHex: () => normalizeHex,
     normalizeNetwork: () => normalizeNetwork,
     normalizePrivateKeyTo32Bytes: () => normalizePrivateKeyTo32Bytes,
+    openBoundReply: () => openBoundReply,
     parseDepinMessage: () => parseDepinMessage,
-    parseDepinPoolInfo: () => parseDepinPoolInfo,
     parsePublicKey: () => parsePublicKey,
+    poolKeyFingerprint: () => poolKeyFingerprint,
     privateKeyMatchesPublicKey: () => privateKeyMatchesPublicKey,
     pubKeyMatchesAddress: () => pubKeyMatchesAddress,
+    receiveDepinMessages: () => receiveDepinMessages,
+    recoverPublicKeyFromMessage: () => recoverPublicKeyFromMessage,
+    requestDepinChallenge: () => requestDepinChallenge,
     resolveDepinRecipients: () => resolveDepinRecipients,
     ripemd160: () => ripemd1603,
     serializeEciesMessage: () => serializeEciesMessage,
     sha256: () => sha2563,
+    signRecoverableMessage: () => signRecoverableMessage,
+    submitDepinMessage: () => submitDepinMessage,
     timingSafeEqual: () => timingSafeEqual,
     unwrapMessageFromServer: () => unwrapMessageFromServer,
     validateAndDecryptDepinMessage: () => validateAndDecryptDepinMessage,
     validateDepinSectionToken: () => validateDepinSectionToken,
     verifyDepinReceivedMessage: () => verifyDepinReceivedMessage,
+    verifyDepinReply: () => verifyDepinReply,
+    verifyRecoverableMessage: () => verifyRecoverableMessage,
     wifToHex: () => wifToHex,
     wrapMessageForServer: () => wrapMessageForServer
   });
@@ -675,6 +709,34 @@ var neuraiDepinMsg = (() => {
 
   // src/base58.js
   var BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  function base58Encode(bytes) {
+    if (!(bytes instanceof Uint8Array)) throw new Error("base58Encode expects Uint8Array");
+    const digits = [0];
+    for (const byte of bytes) {
+      let carry = byte;
+      for (let j = 0; j < digits.length; j++) {
+        carry += digits[j] << 8;
+        digits[j] = carry % 58;
+        carry = carry / 58 | 0;
+      }
+      while (carry > 0) {
+        digits.push(carry % 58);
+        carry = carry / 58 | 0;
+      }
+    }
+    let out = "";
+    for (const byte of bytes) {
+      if (byte !== 0) break;
+      out += "1";
+    }
+    for (let i = digits.length - 1; i >= 0; i--) out += BASE58_ALPHABET[digits[i]];
+    return out;
+  }
+  async function base58CheckEncode(version, payload) {
+    const data = concatBytes(new Uint8Array([version]), payload);
+    const checksum = (await doubleSha256(data)).slice(0, 4);
+    return base58Encode(concatBytes(data, checksum));
+  }
   function base58Decode(str) {
     const bytes = [];
     for (let i = 0; i < str.length; i++) {
@@ -3989,15 +4051,12 @@ var neuraiDepinMsg = (() => {
     const {
       network,
       privateKey = null,
+      openPayload = null,
       requestedToken = null,
       limits = {},
-      preAuthenticatedPolicy = "reject",
       senderPubKey = null,
       resolveSenderPubKey = null
     } = options;
-    if (preAuthenticatedPolicy !== "reject" && preAuthenticatedPolicy !== "trust-gateway") {
-      throw new Error("preAuthenticatedPolicy must be 'reject' or 'trust-gateway'");
-    }
     const effLimits = { ...DEFAULT_LIMITS, ...limits };
     const result = {
       ok: false,
@@ -4044,11 +4103,11 @@ var neuraiDepinMsg = (() => {
     result.authentication = verification.authentication;
     result.senderPubKey = verification.senderPubKey;
     if (verification.authentication === "gateway-preauthenticated") {
-      if (preAuthenticatedPolicy !== "trust-gateway") {
-        result.reason = "pre-authenticated gateway message rejected by policy";
-        return result;
-      }
-    } else if (!verification.signatureValid) {
+      result.authentication = "invalid";
+      result.reason = "protocol-1-preauthenticated";
+      return result;
+    }
+    if (!verification.signatureValid) {
       result.reason = verification.reason || "signature verification failed";
       return result;
     }
@@ -4065,6 +4124,24 @@ var neuraiDepinMsg = (() => {
         result.ok = false;
         result.reason = "encrypted payload is malformed: " + e.message;
         return result;
+      }
+    } else if (openPayload !== null) {
+      if (typeof openPayload !== "function") {
+        throw new Error("options.openPayload must be a function");
+      }
+      try {
+        deserializeEciesMessage(norm.encryptedPayload);
+      } catch (e) {
+        result.ok = false;
+        result.reason = "encrypted payload is malformed: " + e.message;
+        return result;
+      }
+      try {
+        const out = await openPayload(norm.encryptedPayload);
+        if (out !== null && out !== void 0) {
+          result.plaintext = typeof out === "string" ? out : new TextDecoder().decode(out);
+        }
+      } catch {
       }
     }
     return result;
@@ -4121,7 +4198,17 @@ var neuraiDepinMsg = (() => {
       }
       messages.push(entry);
     }
-    return { messages, hasMore, wasEncrypted };
+    let nextChallenge = null;
+    let nextExpiresIn = null;
+    if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+      if (typeof payload.next_challenge === "string" && /^[0-9a-f]{64}$/.test(payload.next_challenge)) {
+        nextChallenge = payload.next_challenge;
+        if (typeof payload.next_expires_in === "number") {
+          nextExpiresIn = payload.next_expires_in;
+        }
+      }
+    }
+    return { messages, hasMore, wasEncrypted, nextChallenge, nextExpiresIn };
   }
   async function wrapMessageForServer(messageHex, serverPubKeyHex, senderAddress) {
     if (!messageHex || !serverPubKeyHex || !senderAddress) {
@@ -4159,65 +4246,704 @@ var neuraiDepinMsg = (() => {
     }
   }
 
-  // src/resolve.js
-  async function resolveDepinRecipients(params) {
-    const { token, poolRoot, maxRecipients, senderPubKey, rpc, network = null } = params;
+  // src/errors.js
+  var DepinError = class extends Error {
+    constructor(message, code, cause) {
+      super(message);
+      this.name = new.target.name;
+      this.code = code;
+      if (cause !== void 0) this.cause = cause;
+    }
+  };
+  var DepinProtocolError = class extends DepinError {
+    constructor(message, cause) {
+      super(message, "DEPIN_PROTOCOL", cause);
+    }
+  };
+  var DepinReplyAuthenticationError = class extends DepinError {
+    constructor(message, cause) {
+      super(message, "DEPIN_REPLY_AUTH", cause);
+    }
+  };
+  var DepinReplyDecryptionError = class extends DepinError {
+    constructor(message, cause) {
+      super(message, "DEPIN_REPLY_DECRYPT", cause);
+    }
+  };
+  var PoolPinMismatchError = class extends DepinError {
+    constructor(message, cause) {
+      super(message, "DEPIN_PIN_MISMATCH", cause);
+    }
+  };
+  var DepinCapabilityError = class extends DepinError {
+    constructor(message, cause) {
+      super(message, "DEPIN_CAPABILITY", cause);
+    }
+  };
+
+  // src/signmessage.js
+  var NEURAI_MESSAGE_MAGIC = "Neurai Signed Message:\n";
+  var WIF_PREFIX = { mainnet: 128, test: 239 };
+  var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var B64_LOOKUP = (() => {
+    const table = new Int16Array(128).fill(-1);
+    for (let i = 0; i < B64_ALPHABET.length; i++) table[B64_ALPHABET.charCodeAt(i)] = i;
+    return table;
+  })();
+  function base64Encode(bytes) {
+    if (!(bytes instanceof Uint8Array)) {
+      throw new DepinProtocolError("base64Encode expects Uint8Array");
+    }
+    let out = "";
+    for (let i = 0; i < bytes.length; i += 3) {
+      const b0 = bytes[i];
+      const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0;
+      const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0;
+      out += B64_ALPHABET[b0 >> 2];
+      out += B64_ALPHABET[(b0 & 3) << 4 | b1 >> 4];
+      out += i + 1 < bytes.length ? B64_ALPHABET[(b1 & 15) << 2 | b2 >> 6] : "=";
+      out += i + 2 < bytes.length ? B64_ALPHABET[b2 & 63] : "=";
+    }
+    return out;
+  }
+  function base64Decode(str) {
+    if (typeof str !== "string" || str.length === 0 || str.length % 4 !== 0) {
+      throw new DepinProtocolError("Invalid Base64: length must be a positive multiple of 4");
+    }
+    let padding = 0;
+    if (str.endsWith("==")) padding = 2;
+    else if (str.endsWith("=")) padding = 1;
+    const body = str.slice(0, str.length - padding);
+    if (body.includes("=")) {
+      throw new DepinProtocolError("Invalid Base64: padding inside the data");
+    }
+    const out = new Uint8Array(str.length / 4 * 3 - padding);
+    let outPos = 0;
+    let buffer = 0;
+    let bits = 0;
+    for (let i = 0; i < body.length; i++) {
+      const code = body.charCodeAt(i);
+      const value = code < 128 ? B64_LOOKUP[code] : -1;
+      if (value < 0) {
+        throw new DepinProtocolError("Invalid Base64 character at position " + i);
+      }
+      buffer = buffer << 6 | value;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out[outPos++] = buffer >> bits & 255;
+      }
+    }
+    if (padding > 0 && (buffer & (1 << bits) - 1) !== 0) {
+      throw new DepinProtocolError("Invalid Base64: non-canonical trailing bits");
+    }
+    return out;
+  }
+  function decodeWIF(wif) {
+    if (typeof wif !== "string" || wif.length < 50) {
+      throw new DepinProtocolError("Invalid WIF: not a WIF string");
+    }
+    const decoded = base58Decode(wif);
+    if (decoded.length < 37) throw new DepinProtocolError("Invalid WIF: too short");
+    const payload = decoded.slice(0, -4);
+    const checksum = decoded.slice(-4);
+    const hash = sha2562(sha2562(payload));
+    for (let i = 0; i < 4; i++) {
+      if (checksum[i] !== hash[i]) {
+        throw new DepinProtocolError("Invalid WIF: checksum mismatch");
+      }
+    }
+    const version = payload[0];
+    let network = null;
+    if (version === WIF_PREFIX.mainnet) network = "mainnet";
+    else if (version === WIF_PREFIX.test) network = "test";
+    else throw new DepinProtocolError("Invalid WIF: unknown version byte " + version);
+    let compressed;
+    if (payload.length === 34 && payload[33] === 1) compressed = true;
+    else if (payload.length === 33) compressed = false;
+    else throw new DepinProtocolError("Invalid WIF: unexpected payload length " + payload.length);
+    return { privateKey: payload.slice(1, 33), compressed, network };
+  }
+  function normalizeSigningKey(privateKeyOrWif) {
+    if (typeof privateKeyOrWif !== "string" || privateKeyOrWif.length === 0) {
+      throw new DepinProtocolError("Private key is required (compressed WIF or 64-hex)");
+    }
+    const asHex = normalizeHex(privateKeyOrWif);
+    if (asHex && asHex.length === 64) {
+      return { privateKey: hexToBytes(asHex), network: null };
+    }
+    const decoded = decodeWIF(privateKeyOrWif);
+    if (!decoded.compressed) {
+      throw new DepinProtocolError(
+        "Uncompressed WIF rejected: protocol 2 addresses derive from compressed keys"
+      );
+    }
+    return { privateKey: decoded.privateKey, network: decoded.network };
+  }
+  function neuraiSignedMessageHash(message) {
+    if (typeof message !== "string") {
+      throw new DepinProtocolError("Message to hash must be a string");
+    }
+    const data = concatBytes(serializeString(NEURAI_MESSAGE_MAGIC), serializeString(message));
+    return sha2562(sha2562(data));
+  }
+  function signRecoverableMessage(message, privateKeyOrCompressedWif) {
+    const { privateKey } = normalizeSigningKey(privateKeyOrCompressedWif);
+    const hash = neuraiSignedMessageHash(message);
+    const signature = secp256k1.sign(hash, privateKey);
+    if (typeof signature.recovery !== "number") {
+      throw new DepinProtocolError("Signature recovery id unavailable");
+    }
+    const compact = signature.toCompactRawBytes();
+    const header = 27 + signature.recovery + 4;
+    const out = new Uint8Array(65);
+    out[0] = header;
+    out.set(compact, 1);
+    return base64Encode(out);
+  }
+  function decodeRecoverableSignature(signatureBase64) {
+    const bytes = base64Decode(signatureBase64);
+    if (bytes.length !== 65) {
+      throw new DepinProtocolError(
+        "Recoverable signature must be 65 bytes; got " + bytes.length
+      );
+    }
+    const header = bytes[0];
+    if (header < 27 || header > 34) {
+      throw new DepinProtocolError("Invalid recoverable signature header: " + header);
+    }
+    return {
+      recovery: header - 27 & 3,
+      compressed: header >= 31,
+      compact: bytes.slice(1)
+    };
+  }
+  function recoverPublicKeyFromMessage(message, signatureBase64) {
+    const { recovery, compressed, compact } = decodeRecoverableSignature(signatureBase64);
+    const hash = neuraiSignedMessageHash(message);
+    let point;
+    try {
+      const sig = secp256k1.Signature.fromCompact(compact).addRecoveryBit(recovery);
+      point = sig.recoverPublicKey(hash);
+    } catch (e) {
+      throw new DepinProtocolError(
+        "Public key recovery failed: " + (e && e.message ? e.message : e),
+        e
+      );
+    }
+    return bytesToHex(point.toRawBytes(compressed));
+  }
+  function verifyRecoverableMessage(message, signatureBase64, expectedPublicKey) {
+    const expected = parsePublicKey(expectedPublicKey);
+    let recoveredHex;
+    try {
+      recoveredHex = recoverPublicKeyFromMessage(message, signatureBase64);
+    } catch (e) {
+      if (e instanceof DepinProtocolError && /recovery failed/i.test(e.message)) {
+        return false;
+      }
+      throw e;
+    }
+    return parsePublicKey(recoveredHex).pointId === expected.pointId;
+  }
+
+  // src/depin-reply.js
+  var MAX_REPLY_HEX_CHARS = 32 * 1024 * 1024;
+  var MAX_DECODED_JSON_BYTES = 16 * 1024 * 1024;
+  var VERIFIED_REPLY_BRAND = /* @__PURE__ */ Symbol("neurai.depin.verifiedReply");
+  function isVerifiedDepinReply(value) {
+    return Boolean(value) && typeof value === "object" && value[VERIFIED_REPLY_BRAND] === true;
+  }
+  function sha256HexOfAscii(str) {
+    return bytesToHex(sha2562(new TextEncoder().encode(str)));
+  }
+  function assertPreimageComponent(value, name) {
+    if (typeof value !== "string") {
+      throw new DepinProtocolError(name + " must be a string");
+    }
+    if (value.includes("|")) {
+      throw new DepinProtocolError(name + " must not contain '|'");
+    }
+    return value;
+  }
+  function buildDepinReplyPreimage({ method, token = "", address = "", challenge = "", replyHex }) {
+    assertPreimageComponent(method, "method");
+    if (!/^[a-z0-9]+$/.test(method)) {
+      throw new DepinProtocolError("method must be a lowercase RPC name");
+    }
+    assertPreimageComponent(token, "token");
+    assertPreimageComponent(address, "address");
+    assertPreimageComponent(challenge, "challenge");
+    if (typeof replyHex !== "string" || replyHex.length === 0) {
+      throw new DepinProtocolError("replyHex is required");
+    }
+    return "DEPIN-RESP|" + method + "|" + token + "|" + address + "|" + challenge + "|" + sha256HexOfAscii(replyHex);
+  }
+  function validateReplyShape(reply) {
+    if (!reply || typeof reply !== "object" || Array.isArray(reply)) {
+      throw new DepinProtocolError("DePIN reply must be an object");
+    }
+    const hasBody = typeof reply.body === "string";
+    const hasEncrypted = typeof reply.encrypted === "string";
+    if (hasBody === hasEncrypted) {
+      throw new DepinProtocolError(
+        "DePIN reply must carry exactly one of 'body' or 'encrypted'"
+      );
+    }
+    if (typeof reply.poolsig !== "string" || reply.poolsig.length === 0) {
+      throw new DepinProtocolError("DePIN reply is missing poolsig");
+    }
+    const replyHex = hasBody ? reply.body : reply.encrypted;
+    if (replyHex.length === 0 || replyHex.length > MAX_REPLY_HEX_CHARS) {
+      throw new DepinProtocolError("DePIN reply hex is empty or exceeds the size limit");
+    }
+    if (replyHex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(replyHex)) {
+      throw new DepinProtocolError("DePIN reply hex must be canonical lowercase hex");
+    }
+    return { kind: hasBody ? "plain" : "bound", replyHex };
+  }
+  function verifyDepinReply({ reply, method, token = "", address = "", challenge = "", poolPublicKey }) {
+    const { kind, replyHex } = validateReplyShape(reply);
+    if (!poolPublicKey) {
+      throw new DepinProtocolError("poolPublicKey is required to verify a DePIN reply");
+    }
+    const expected = parsePublicKey(poolPublicKey);
+    const preimage = buildDepinReplyPreimage({ method, token, address, challenge, replyHex });
+    let recovered;
+    try {
+      recovered = recoverPublicKeyFromMessage(preimage, reply.poolsig);
+    } catch (e) {
+      throw new DepinReplyAuthenticationError(
+        "poolsig is malformed or unrecoverable for " + method,
+        e
+      );
+    }
+    if (parsePublicKey(recovered).pointId !== expected.pointId) {
+      throw new DepinReplyAuthenticationError(
+        "poolsig for " + method + " does not verify against the pinned pool key"
+      );
+    }
+    return Object.freeze({
+      [VERIFIED_REPLY_BRAND]: true,
+      kind,
+      replyHex,
+      method,
+      token,
+      address,
+      challenge,
+      poolPublicKey: expected.pointId
+    });
+  }
+  function parseJsonBytes(bytes, context) {
+    if (bytes.length > MAX_DECODED_JSON_BYTES) {
+      throw new DepinProtocolError(context + ": decoded JSON exceeds the size limit");
+    }
+    let text;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch (e) {
+      throw new DepinProtocolError(context + ": decoded bytes are not valid UTF-8", e);
+    }
+    let value;
+    try {
+      value = JSON.parse(text);
+    } catch (e) {
+      throw new DepinProtocolError(context + ": decoded text is not valid JSON", e);
+    }
+    if (!value || typeof value !== "object") {
+      throw new DepinProtocolError(context + ": decoded JSON is not an object");
+    }
+    return value;
+  }
+  function decodePlainReply(verifiedReply) {
+    if (!isVerifiedDepinReply(verifiedReply)) {
+      throw new DepinProtocolError("decodePlainReply requires a verified reply");
+    }
+    if (verifiedReply.kind !== "plain") {
+      throw new DepinProtocolError("decodePlainReply requires a plain reply");
+    }
+    return parseJsonBytes(hexToBytes(verifiedReply.replyHex), verifiedReply.method);
+  }
+  async function openBoundReply(verifiedReply, opener) {
+    if (!isVerifiedDepinReply(verifiedReply)) {
+      throw new DepinProtocolError("openBoundReply requires a verified reply");
+    }
+    if (verifiedReply.kind !== "bound") {
+      throw new DepinProtocolError("openBoundReply requires a bound reply");
+    }
+    if (!opener) {
+      throw new DepinProtocolError("openBoundReply requires a private key or an openReply callback");
+    }
+    let plaintext;
+    if (typeof opener === "function") {
+      let out;
+      try {
+        out = await opener(verifiedReply.replyHex);
+      } catch (e) {
+        throw new DepinReplyDecryptionError(
+          "openReply callback failed for " + verifiedReply.method,
+          e
+        );
+      }
+      if (typeof out === "string") plaintext = new TextEncoder().encode(out);
+      else if (out instanceof Uint8Array) plaintext = out;
+      else {
+        throw new DepinReplyDecryptionError(
+          "openReply callback must return bytes or a string"
+        );
+      }
+    } else {
+      const privKey = await normalizePrivateKeyTo32Bytes(opener);
+      let message;
+      try {
+        message = deserializeEciesMessage(hexToBytes(verifiedReply.replyHex));
+      } catch (e) {
+        throw new DepinReplyDecryptionError(
+          "bound reply envelope does not deserialize for " + verifiedReply.method,
+          e
+        );
+      }
+      plaintext = await eciesDecrypt(message, privKey);
+      if (plaintext === null) {
+        throw new DepinReplyDecryptionError(
+          "bound reply for " + verifiedReply.method + " is not encrypted for this key or failed authentication"
+        );
+      }
+    }
+    return parseJsonBytes(plaintext, verifiedReply.method);
+  }
+  function canonicalPubKeyHex(pubKey) {
+    return parsePublicKey(pubKey).pointId;
+  }
+  function poolKeyFingerprint(pubKey) {
+    const canonical = canonicalPubKeyHex(pubKey);
+    const digest = bytesToHex(sha2562(hexToBytes(canonical)));
+    return digest.slice(0, 16).replace(/(.{4})(?=.)/g, "$1 ");
+  }
+  function readUntrustedBodyJson(reply) {
+    const { kind, replyHex } = validateReplyShape(reply);
+    if (kind !== "plain") {
+      throw new DepinProtocolError("depingetmsginfo reply must be a plain reply");
+    }
+    return { untrustedBody: parseJsonBytes(hexToBytes(replyHex), "depingetmsginfo (untrusted)") };
+  }
+  async function checkAnnouncedPoolIdentity(info, poolPublicKey, network) {
+    const announcedKey = info.depinpoolpkey;
+    if (typeof announcedKey !== "string" || canonicalPubKeyHex(announcedKey) !== canonicalPubKeyHex(poolPublicKey)) {
+      throw new PoolPinMismatchError(
+        "Announced depinpoolpkey does not match the verified pool key"
+      );
+    }
+    if (typeof info.depinpoolkeyaddress === "string" && info.depinpoolkeyaddress.length > 0) {
+      const { payload } = await decodeP2PKHAddress(info.depinpoolkeyaddress, network ?? null);
+      const keyHash = await hash160(parsePublicKey(announcedKey).bytes);
+      if (bytesToHex(keyHash) !== bytesToHex(payload)) {
+        throw new PoolPinMismatchError(
+          "depinpoolkeyaddress does not correspond to depinpoolpkey"
+        );
+      }
+    }
+  }
+  function validatePoolInfoShape(info) {
+    if (info.protocol !== 2) {
+      throw new DepinProtocolError(
+        "Pool announces protocol " + JSON.stringify(info.protocol) + "; this library requires protocol 2"
+      );
+    }
+    const tokenCheck = validateDepinSectionToken(info.token);
+    if (!tokenCheck.valid) {
+      throw new DepinProtocolError("Pool root token invalid: " + tokenCheck.error);
+    }
+    if (!Number.isInteger(info.maxrecipients) || info.maxrecipients < 1) {
+      throw new DepinProtocolError("Pool maxrecipients invalid");
+    }
+  }
+  async function decodeDepinPoolInfo({ reply, trust, serviceId, network }) {
+    if (!trust || typeof trust !== "object" || typeof trust.mode !== "string") {
+      throw new DepinProtocolError("trust must be an object with a 'mode'");
+    }
+    if (typeof serviceId !== "string" || serviceId.length === 0) {
+      throw new DepinProtocolError("serviceId is required (endpoint identity)");
+    }
+    if (trust.mode === "pinned") {
+      const pin = trust.pin;
+      if (!pin || typeof pin.serviceId !== "string" || typeof pin.poolRoot !== "string" || typeof pin.poolPublicKey !== "string") {
+        throw new DepinProtocolError("pinned trust requires { serviceId, poolRoot, poolPublicKey }");
+      }
+      if (pin.serviceId !== serviceId) {
+        throw new PoolPinMismatchError(
+          "Reply comes from a different service than the pinned one"
+        );
+      }
+      const verified = verifyDepinReply({
+        reply,
+        method: "depingetmsginfo",
+        token: pin.poolRoot,
+        poolPublicKey: pin.poolPublicKey
+      });
+      const info = decodePlainReply(verified);
+      validatePoolInfoShape(info);
+      if (info.token !== pin.poolRoot) {
+        throw new PoolPinMismatchError("Announced pool root does not match the pinned root");
+      }
+      await checkAnnouncedPoolIdentity(info, pin.poolPublicKey, network);
+      return {
+        info,
+        pin: { serviceId, poolRoot: pin.poolRoot, poolPublicKey: canonicalPubKeyHex(pin.poolPublicKey) },
+        trust: "pinned",
+        fingerprint: poolKeyFingerprint(pin.poolPublicKey)
+      };
+    }
+    if (trust.mode === "key") {
+      if (typeof trust.poolPublicKey !== "string") {
+        throw new DepinProtocolError("key trust requires poolPublicKey");
+      }
+      const { untrustedBody } = readUntrustedBodyJson(reply);
+      const untrustedToken = untrustedBody.token;
+      if (typeof untrustedToken !== "string") {
+        throw new DepinProtocolError("depingetmsginfo body has no token to bind the preimage");
+      }
+      const verified = verifyDepinReply({
+        reply,
+        method: "depingetmsginfo",
+        token: untrustedToken,
+        poolPublicKey: trust.poolPublicKey
+      });
+      const info = decodePlainReply(verified);
+      validatePoolInfoShape(info);
+      await checkAnnouncedPoolIdentity(info, trust.poolPublicKey, network);
+      return {
+        info,
+        pin: { serviceId, poolRoot: info.token, poolPublicKey: canonicalPubKeyHex(trust.poolPublicKey) },
+        trust: "key",
+        fingerprint: poolKeyFingerprint(trust.poolPublicKey)
+      };
+    }
+    if (trust.mode === "tofu") {
+      const { untrustedBody } = readUntrustedBodyJson(reply);
+      const announcedKey = untrustedBody.depinpoolpkey;
+      const untrustedToken = untrustedBody.token;
+      if (typeof announcedKey !== "string" || typeof untrustedToken !== "string") {
+        throw new DepinProtocolError(
+          "depingetmsginfo body lacks depinpoolpkey/token for TOFU"
+        );
+      }
+      const verified = verifyDepinReply({
+        reply,
+        method: "depingetmsginfo",
+        token: untrustedToken,
+        poolPublicKey: announcedKey
+      });
+      const info = decodePlainReply(verified);
+      validatePoolInfoShape(info);
+      await checkAnnouncedPoolIdentity(info, announcedKey, network);
+      return {
+        info,
+        pin: { serviceId, poolRoot: info.token, poolPublicKey: canonicalPubKeyHex(announcedKey) },
+        trust: "tofu",
+        fingerprint: poolKeyFingerprint(announcedKey)
+      };
+    }
+    throw new DepinProtocolError("Unknown trust mode: " + trust.mode);
+  }
+
+  // src/identity.js
+  async function createSoftwareIdentity({ privateKey, network, address } = {}) {
+    if (!privateKey) {
+      throw new DepinProtocolError("privateKey (compressed WIF or 64-hex) is required");
+    }
+    if (!network) {
+      throw new DepinProtocolError("network is required ('mainnet' or 'test')");
+    }
+    const net = normalizeNetwork(network);
+    const { privateKey: keyBytes, network: wifNetwork } = normalizeSigningKey(privateKey);
+    if (wifNetwork !== null && wifNetwork !== net) {
+      throw new DepinProtocolError(
+        "WIF network (" + wifNetwork + ") does not match the requested network (" + net + ")"
+      );
+    }
+    const publicKeyBytes = secp256k1.getPublicKey(keyBytes, true);
+    const publicKey = bytesToHex(publicKeyBytes);
+    const keyHash = await hash160(publicKeyBytes);
+    let finalAddress;
+    if (address !== void 0 && address !== null) {
+      const { payload } = await decodeP2PKHAddress(address, net);
+      if (!timingSafeEqual(keyHash, payload)) {
+        throw new DepinProtocolError(
+          "address does not correspond to the compressed public key of this private key"
+        );
+      }
+      finalAddress = address;
+    } else {
+      finalAddress = await base58CheckEncode(P2PKH_PREFIX[net], keyHash);
+    }
+    return {
+      address: finalAddress,
+      publicKey,
+      network: net,
+      signMessage: (preimage) => signRecoverableMessage(preimage, bytesToHex(keyBytes)),
+      signDigest: (digest) => {
+        if (!(digest instanceof Uint8Array) || digest.length !== 32) {
+          throw new DepinProtocolError("signDigest expects a 32-byte digest");
+        }
+        return secp256k1.sign(digest, keyBytes).toDERRawBytes();
+      },
+      openReply: async (encryptedHex) => {
+        let message;
+        try {
+          message = deserializeEciesMessage(hexToBytes(encryptedHex));
+        } catch (e) {
+          throw new DepinReplyDecryptionError("envelope does not deserialize", e);
+        }
+        const plaintext = await eciesDecrypt(message, keyBytes);
+        if (plaintext === null) {
+          throw new DepinReplyDecryptionError(
+            "envelope is not encrypted for this identity or failed authentication"
+          );
+        }
+        return plaintext;
+      }
+    };
+  }
+  function assertIdentityCapabilities(identity, capabilities) {
+    if (!identity || typeof identity !== "object") {
+      throw new DepinCapabilityError("identity object is required");
+    }
+    if (typeof identity.address !== "string" || identity.address.length === 0) {
+      throw new DepinCapabilityError("identity.address is required");
+    }
+    for (const capability of capabilities) {
+      if (typeof identity[capability] !== "function") {
+        throw new DepinCapabilityError(
+          "identity is missing the " + capability + " capability required by this flow"
+        );
+      }
+    }
+  }
+
+  // src/depin-client.js
+  var CHALLENGE_HEX = /^[0-9a-f]{64}$/;
+  var RECEIVE_MAX_LIMIT = 1e3;
+  function assertComponent(value, name) {
+    if (typeof value !== "string" || value.length === 0) {
+      throw new DepinProtocolError(name + " is required");
+    }
+    if (value.includes("|")) {
+      throw new DepinProtocolError(name + " must not contain '|'");
+    }
+    return value;
+  }
+  function assertToken(token, name = "token") {
+    const check = validateDepinSectionToken(token);
+    if (!check.valid) throw new DepinProtocolError(name + " invalid: " + check.error);
+    return token;
+  }
+  function assertChallenge(challenge) {
+    if (typeof challenge !== "string" || !CHALLENGE_HEX.test(challenge)) {
+      throw new DepinProtocolError("challenge must be 64 lowercase hex chars");
+    }
+    return challenge;
+  }
+  function assertTimestampMs(value) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new DepinProtocolError("timestampMs must be a positive safe integer");
+    }
+    return value;
+  }
+  function buildDepinRequestPreimage({ type = "receive", token, address, timestampMs }) {
+    if (type !== "receive" && type !== "admin") {
+      throw new DepinProtocolError("type must be 'receive' or 'admin'");
+    }
+    assertToken(token);
+    assertComponent(address, "address");
+    assertTimestampMs(timestampMs);
+    return "DEPIN-REQ|" + type + "|" + token + "|" + address + "|" + timestampMs;
+  }
+  function buildDepinGetPreimage({ token, address, challenge }) {
+    assertToken(token);
+    assertComponent(address, "address");
+    assertChallenge(challenge);
+    return "DEPIN-GET|" + token + "|" + address + "|" + challenge;
+  }
+  function buildDepinClearPreimage({ scope, address, challenge }) {
+    assertToken(scope, "scope");
+    assertComponent(address, "address");
+    assertChallenge(challenge);
+    return "DEPIN-CLEAR|" + scope + "|" + address + "|" + challenge;
+  }
+  var lastTimestampByAddress = /* @__PURE__ */ new Map();
+  function nextTimestampMs(address, clock) {
+    const now = clock ? clock() : Date.now();
+    assertTimestampMs(now);
+    const last = lastTimestampByAddress.get(address) ?? 0;
+    const next = Math.max(now, last + 1);
+    lastTimestampByAddress.set(address, next);
+    return next;
+  }
+  function assertRpc(rpc) {
     if (!rpc || typeof rpc.call !== "function") {
-      throw new Error("rpc with a call(method, params) function is required");
+      throw new DepinProtocolError("rpc with a call(method, params) function is required");
     }
-    const tokenCheck = validateDepinSectionToken(token);
-    if (!tokenCheck.valid) throw new Error("Invalid token: " + tokenCheck.error);
-    const rootCheck = validateDepinSectionToken(poolRoot);
-    if (!rootCheck.valid) throw new Error("Invalid poolRoot: " + rootCheck.error);
-    if (!isDepinTokenInScope(token, poolRoot)) {
-      throw new Error("token '" + token + "' is not under pool root '" + poolRoot + "'");
+  }
+  function assertPoolKey(poolPublicKey) {
+    if (!poolPublicKey) {
+      throw new DepinProtocolError("poolPublicKey (the pinned pool key) is required");
     }
-    if (!Number.isInteger(maxRecipients) || maxRecipients < 1 || maxRecipients > MAX_DEPIN_RECIPIENTS) {
-      throw new Error("maxRecipients must be an integer between 1 and " + MAX_DEPIN_RECIPIENTS);
+    return poolPublicKey;
+  }
+  async function getDepinPoolInfo({ rpc, serviceId, trust, network }) {
+    assertRpc(rpc);
+    const reply = await rpc.call("depingetmsginfo", []);
+    return decodeDepinPoolInfo({ reply, trust, serviceId, network });
+  }
+  async function decodeDepinRecipients(body, { token, poolRoot, maxRecipients, senderPubKey, network = null }) {
+    if (!body || typeof body !== "object") {
+      throw new DepinProtocolError("depingetancestorrecipients returned no result");
     }
-    if (!senderPubKey) {
-      throw new Error("senderPubKey is required to size the final recipient map");
+    if (body.token !== token) {
+      throw new DepinProtocolError(
+        "Response token '" + body.token + "' does not match requested '" + token + "'"
+      );
+    }
+    if (body.stop_at !== poolRoot) {
+      throw new DepinProtocolError(
+        "Response stop_at '" + body.stop_at + "' does not match pool root '" + poolRoot + "'"
+      );
+    }
+    if (body.truncated !== false) {
+      throw new DepinProtocolError(
+        "Recipient list is truncated or incomplete; refusing to build a partial group"
+      );
+    }
+    if (!Array.isArray(body.recipients)) {
+      throw new DepinProtocolError("Response recipients is not an array");
+    }
+    if (typeof body.returned === "number" && body.returned !== body.recipients.length) {
+      throw new DepinProtocolError("Response returned count does not match recipients length");
+    }
+    if (!Array.isArray(body.ancestors) || body.ancestors[0] !== token) {
+      throw new DepinProtocolError("Response ancestors is inconsistent with the requested token");
     }
     const senderKey = parsePublicKey(senderPubKey);
-    const result = await rpc.call("depingetancestorrecipients", [token, maxRecipients + 1, poolRoot]);
-    if (!result || typeof result !== "object") {
-      throw new Error("depingetancestorrecipients returned no result");
-    }
-    if (result.token !== token) {
-      throw new Error("Response token '" + result.token + "' does not match requested '" + token + "'");
-    }
-    if (result.stop_at !== poolRoot) {
-      throw new Error("Response stop_at '" + result.stop_at + "' does not match pool root '" + poolRoot + "'");
-    }
-    if (result.truncated !== false) {
-      throw new Error("Recipient list is truncated or incomplete; refusing to build a partial group");
-    }
-    if (!Array.isArray(result.recipients)) {
-      throw new Error("Response recipients is not an array");
-    }
-    if (typeof result.returned === "number" && result.returned !== result.recipients.length) {
-      throw new Error("Response returned count does not match recipients length");
-    }
-    if (!Array.isArray(result.ancestors) || result.ancestors[0] !== token) {
-      throw new Error("Response ancestors is inconsistent with the requested token");
-    }
     const byPoint = /* @__PURE__ */ new Map();
-    for (const entry of result.recipients) {
+    for (const entry of body.recipients) {
       if (!entry || typeof entry.address !== "string" || typeof entry.pubkey !== "string") {
-        throw new Error("Malformed recipient entry in response");
+        throw new DepinProtocolError("Malformed recipient entry in response");
       }
       const parsed = parsePublicKey(entry.pubkey);
       const { payload } = await decodeP2PKHAddress(entry.address, network);
       const keyHash = await hash160(parsed.bytes);
       if (!timingSafeEqual(keyHash, payload)) {
-        throw new Error("Recipient pubkey does not match its address '" + entry.address + "'");
+        throw new DepinProtocolError(
+          "Recipient pubkey does not match its address '" + entry.address + "'"
+        );
       }
       if (!byPoint.has(parsed.pointId)) byPoint.set(parsed.pointId, parsed.bytes);
     }
     const senderIncludedInHolders = byPoint.has(senderKey.pointId);
     const finalCount = byPoint.size + (senderIncludedInHolders ? 0 : 1);
     if (finalCount > maxRecipients) {
-      throw new Error(
+      throw new DepinProtocolError(
         "Final recipient map would have " + finalCount + " entries (sender included), above the pool limit of " + maxRecipients
       );
     }
@@ -4225,23 +4951,51 @@ var neuraiDepinMsg = (() => {
       recipientPubKeys: Array.from(byPoint.values()).map(bytesToHex),
       recipientCount: finalCount,
       senderIncludedInHolders,
-      ancestors: result.ancestors,
+      ancestors: body.ancestors,
       maxRecipients,
       skipped: {
-        noPubKey: result.skipped_no_pubkey ?? null,
-        noPubKeyComplete: result.skipped_no_pubkey_complete ?? null,
-        restricted: result.skipped_restricted ?? null,
-        restrictedComplete: result.skipped_restricted_complete ?? null
+        noPubKey: body.skipped_no_pubkey ?? null,
+        noPubKeyComplete: body.skipped_no_pubkey_complete ?? null,
+        restricted: body.skipped_restricted ?? null,
+        restrictedComplete: body.skipped_restricted_complete ?? null
       }
     };
   }
+  async function resolveDepinRecipients(params) {
+    const { rpc, token, poolRoot, maxRecipients, senderPubKey, poolPublicKey, network = null } = params;
+    assertRpc(rpc);
+    assertPoolKey(poolPublicKey);
+    assertToken(token);
+    assertToken(poolRoot, "poolRoot");
+    if (!isDepinTokenInScope(token, poolRoot)) {
+      throw new DepinProtocolError("token '" + token + "' is not under pool root '" + poolRoot + "'");
+    }
+    if (!Number.isInteger(maxRecipients) || maxRecipients < 1 || maxRecipients > MAX_DEPIN_RECIPIENTS) {
+      throw new DepinProtocolError(
+        "maxRecipients must be an integer between 1 and " + MAX_DEPIN_RECIPIENTS
+      );
+    }
+    if (!senderPubKey) {
+      throw new DepinProtocolError("senderPubKey is required to size the final recipient map");
+    }
+    const reply = await rpc.call("depingetancestorrecipients", [token, maxRecipients + 1, poolRoot]);
+    const verified = verifyDepinReply({
+      reply,
+      method: "depingetancestorrecipients",
+      token,
+      poolPublicKey
+    });
+    const body = decodePlainReply(verified);
+    return decodeDepinRecipients(body, { token, poolRoot, maxRecipients, senderPubKey, network });
+  }
   async function buildDepinMessageForPool(params) {
-    const { token, poolRoot, maxRecipients, rpc, network, ...buildParams } = params;
+    const { rpc, token, poolRoot, maxRecipients, poolPublicKey, network, ...buildParams } = params;
     const resolution = await resolveDepinRecipients({
+      rpc,
       token,
       poolRoot,
       maxRecipients,
-      rpc,
+      poolPublicKey,
       network,
       senderPubKey: buildParams.senderPubKey
     });
@@ -4253,76 +5007,233 @@ var neuraiDepinMsg = (() => {
     });
     return { ...built, resolution };
   }
-  function parseDepinPoolInfo(raw) {
-    if (typeof raw !== "string" || raw.length === 0) {
-      throw new Error("Empty INFO response");
+  function decodeChallengeResult(opened, expectedType) {
+    if (!opened || typeof opened !== "object" || typeof opened.challenge !== "string" || !CHALLENGE_HEX.test(opened.challenge)) {
+      throw new DepinProtocolError("depinchallenge reply has no valid challenge");
     }
-    const line = raw.trim();
-    const parts = line.split("|");
-    if (parts[0] !== "OK") {
-      throw new Error("Gateway INFO error: " + line);
-    }
-    if (parts.length !== 13) {
-      throw new Error("Unrecognized INFO format (" + parts.length + " fields, expected 13)");
-    }
-    const strictInt = (value, name) => {
-      if (!/^\d+$/.test(value)) throw new Error("INFO " + name + " is not a decimal integer: " + value);
-      const n = Number.parseInt(value, 10);
-      if (!Number.isSafeInteger(n)) throw new Error("INFO " + name + " out of range");
-      return n;
-    };
-    const token = parts[1];
-    const tokenCheck = validateDepinSectionToken(token);
-    if (!tokenCheck.valid) throw new Error("INFO token invalid: " + tokenCheck.error);
-    const port = strictInt(parts[2], "port");
-    if (port < 1 || port > 65535) throw new Error("INFO port out of range: " + port);
-    const reportedMaxRecipients = strictInt(parts[4], "maxRecipients");
-    if (reportedMaxRecipients <= 0) {
-      throw new Error("INFO maxRecipients invalid or zero; failing closed");
-    }
-    const maxMessageSize = strictInt(parts[5], "maxMessageSize");
-    if (maxMessageSize <= 0) throw new Error("INFO maxMessageSize invalid");
-    let poolPubKey = null;
-    if (parts[12] && parts[12] !== "0") {
-      poolPubKey = bytesToHex(parsePublicKey(parts[12]).bytes);
-    }
-    return {
-      token,
-      port,
-      cipher: parts[3],
-      maxRecipients: Math.min(reportedMaxRecipients, MAX_DEPIN_RECIPIENTS),
-      maxMessageSize,
-      messageExpiryHours: strictInt(parts[6], "messageExpiryHours"),
-      maxPoolSizeMB: strictInt(parts[7], "maxPoolSizeMB"),
-      messageCount: strictInt(parts[8], "messageCount"),
-      memoryUsage: strictInt(parts[9], "memoryUsage"),
-      oldestMessage: parts[10],
-      newestMessage: parts[11],
-      poolPubKey,
-      raw: line
-    };
-  }
-  async function getRemoteDepinPoolInfo({ host, port, transport }) {
-    if (!transport || typeof transport.request !== "function") {
-      throw new Error("transport with a request(host, port, payload) function is required");
-    }
-    const raw = await transport.request(host, port, "INFO");
-    return parseDepinPoolInfo(raw);
-  }
-  async function buildDepinMessageForRemotePool(params) {
-    const { host, port, transport, ...rest } = params;
-    const poolInfo = await getRemoteDepinPoolInfo({ host, port, transport });
-    if (!isDepinTokenInScope(rest.token, poolInfo.token)) {
-      throw new Error(
-        "token '" + rest.token + "' is not under the remote pool root '" + poolInfo.token + "'"
+    if (typeof opened.type === "string" && opened.type !== expectedType) {
+      throw new DepinProtocolError(
+        "depinchallenge reply type '" + opened.type + "' does not match requested '" + expectedType + "'"
       );
     }
-    const built = await buildDepinMessageForPool({
-      ...rest,
-      poolRoot: poolInfo.token,
-      maxRecipients: poolInfo.maxRecipients
+    return {
+      challenge: opened.challenge,
+      expiresIn: typeof opened.expires_in === "number" ? opened.expires_in : null,
+      type: opened.type ?? expectedType
+    };
+  }
+  async function requestDepinChallenge({ rpc, identity, token, poolPublicKey, type = "receive", timestampMs, clock }) {
+    assertRpc(rpc);
+    assertPoolKey(poolPublicKey);
+    assertIdentityCapabilities(identity, ["signMessage", "openReply"]);
+    assertToken(token);
+    const t = timestampMs !== void 0 ? assertTimestampMs(timestampMs) : nextTimestampMs(identity.address, clock);
+    const preimage = buildDepinRequestPreimage({
+      type,
+      token,
+      address: identity.address,
+      timestampMs: t
     });
-    return { ...built, poolInfo };
+    const signature = await identity.signMessage(preimage);
+    const reply = await rpc.call("depinchallenge", [token, identity.address, t, signature, type]);
+    const verified = verifyDepinReply({
+      reply,
+      method: "depinchallenge",
+      token,
+      address: identity.address,
+      challenge: "",
+      poolPublicKey
+    });
+    const opened = await openBoundReply(verified, identity.openReply);
+    return { ...decodeChallengeResult(opened, type), timestampMs: t };
+  }
+  async function receiveDepinMessages(params) {
+    const {
+      rpc,
+      identity,
+      token,
+      challenge,
+      poolPublicKey,
+      afterHash,
+      limit,
+      timestamp,
+      network,
+      resolveSenderPubKey,
+      requestedToken,
+      limits
+    } = params;
+    assertRpc(rpc);
+    assertPoolKey(poolPublicKey);
+    assertIdentityCapabilities(identity, ["signMessage", "openReply"]);
+    assertToken(token);
+    assertChallenge(challenge);
+    if (!network) {
+      throw new DepinProtocolError("network is required ('mainnet' or 'test')");
+    }
+    if (afterHash !== void 0 && afterHash !== "" && (typeof afterHash !== "string" || !CHALLENGE_HEX.test(afterHash))) {
+      throw new DepinProtocolError("afterHash must be empty or 64 lowercase hex chars");
+    }
+    if (limit !== void 0 && (!Number.isInteger(limit) || limit < 0 || limit > RECEIVE_MAX_LIMIT)) {
+      throw new DepinProtocolError("limit must be an integer between 0 and " + RECEIVE_MAX_LIMIT);
+    }
+    if (timestamp !== void 0 && (!Number.isInteger(timestamp) || timestamp < 0)) {
+      throw new DepinProtocolError("timestamp must be a non-negative integer (Unix seconds)");
+    }
+    const preimage = buildDepinGetPreimage({ token, address: identity.address, challenge });
+    const signature = await identity.signMessage(preimage);
+    const rpcParams = [token, identity.address, challenge, signature];
+    const tail = [timestamp, afterHash, limit];
+    let lastProvided = -1;
+    for (let i = 0; i < tail.length; i++) if (tail[i] !== void 0) lastProvided = i;
+    for (let i = 0; i <= lastProvided; i++) rpcParams.push(tail[i] === void 0 ? null : tail[i]);
+    const reply = await rpc.call("depinreceivemsg", rpcParams);
+    const verified = verifyDepinReply({
+      reply,
+      method: "depinreceivemsg",
+      token,
+      address: identity.address,
+      challenge,
+      poolPublicKey
+    });
+    const opened = await openBoundReply(verified, identity.openReply);
+    const decoded = await decodeDepinReceiveResponse(opened, {
+      network,
+      // openPayload hands over raw payload bytes; identity.openReply takes the
+      // hex form (same as bound replies), so bridge the encoding here.
+      openPayload: (payloadBytes) => identity.openReply(bytesToHex(payloadBytes)),
+      requestedToken: requestedToken ?? token,
+      resolveSenderPubKey,
+      limits
+    });
+    return {
+      messages: decoded.messages,
+      hasMore: decoded.hasMore,
+      nextChallenge: decoded.nextChallenge,
+      nextExpiresIn: decoded.nextExpiresIn,
+      raw: opened
+    };
+  }
+  function decodeSectionsResult(opened) {
+    if (!opened || typeof opened !== "object" || !Array.isArray(opened.sections)) {
+      throw new DepinProtocolError("depinlistsections reply has no sections array");
+    }
+    for (const section of opened.sections) {
+      if (!section || typeof section.name !== "string") {
+        throw new DepinProtocolError("depinlistsections reply has a malformed section entry");
+      }
+    }
+    return opened;
+  }
+  async function listDepinSectionsPublic({ rpc, poolRoot, poolPublicKey }) {
+    assertRpc(rpc);
+    assertPoolKey(poolPublicKey);
+    assertToken(poolRoot, "poolRoot");
+    const reply = await rpc.call("depinlistsections", []);
+    const verified = verifyDepinReply({
+      reply,
+      method: "depinlistsections",
+      token: poolRoot,
+      poolPublicKey
+    });
+    const body = decodePlainReply(verified);
+    return { sections: decodeSectionsResult(body).sections };
+  }
+  async function listDepinSectionsPrivate({ rpc, identity, scope, challenge, poolPublicKey }) {
+    assertRpc(rpc);
+    assertPoolKey(poolPublicKey);
+    assertIdentityCapabilities(identity, ["signMessage", "openReply"]);
+    assertToken(scope, "scope");
+    assertChallenge(challenge);
+    const preimage = buildDepinGetPreimage({ token: scope, address: identity.address, challenge });
+    const signature = await identity.signMessage(preimage);
+    const reply = await rpc.call("depinlistsections", [identity.address, scope, challenge, signature]);
+    const verified = verifyDepinReply({
+      reply,
+      method: "depinlistsections",
+      token: scope,
+      address: identity.address,
+      challenge,
+      poolPublicKey
+    });
+    const opened = await openBoundReply(verified, identity.openReply);
+    const decoded = decodeSectionsResult(opened);
+    return {
+      sections: decoded.sections,
+      nextChallenge: typeof decoded.next_challenge === "string" ? decoded.next_challenge : null,
+      nextExpiresIn: typeof decoded.next_expires_in === "number" ? decoded.next_expires_in : null
+    };
+  }
+  async function clearDepinMessages({ rpc, identity, scope = "", poolRoot, challenge, poolPublicKey, mode }) {
+    assertRpc(rpc);
+    assertPoolKey(poolPublicKey);
+    assertIdentityCapabilities(identity, ["signMessage", "openReply"]);
+    assertChallenge(challenge);
+    let effectiveScope;
+    if (scope === "") {
+      assertToken(poolRoot, "poolRoot (required when scope is empty)");
+      effectiveScope = poolRoot;
+    } else {
+      assertToken(scope, "scope");
+      effectiveScope = scope;
+    }
+    if (mode !== void 0 && mode !== "all" && (!Number.isInteger(mode) || mode < 0)) {
+      throw new DepinProtocolError("mode must be omitted, 'all' or a non-negative integer of hours");
+    }
+    const preimage = buildDepinClearPreimage({
+      scope: effectiveScope,
+      address: identity.address,
+      challenge
+    });
+    const signature = await identity.signMessage(preimage);
+    const rpcParams = [scope, identity.address, challenge, signature];
+    if (mode !== void 0) rpcParams.push(mode);
+    const reply = await rpc.call("depinclearmsg", rpcParams);
+    const verified = verifyDepinReply({
+      reply,
+      method: "depinclearmsg",
+      token: effectiveScope,
+      address: identity.address,
+      challenge,
+      poolPublicKey
+    });
+    return openBoundReply(verified, identity.openReply);
+  }
+  function decodeSubmitResult(opened) {
+    if (!opened || typeof opened !== "object" || opened.result !== "success") {
+      throw new DepinProtocolError(
+        "depinsubmitmsg reply did not confirm success"
+      );
+    }
+    if (typeof opened.hash !== "string" || !CHALLENGE_HEX.test(opened.hash)) {
+      throw new DepinProtocolError("depinsubmitmsg reply has no valid message hash");
+    }
+    return opened;
+  }
+  async function submitDepinMessage({ rpc, identity, messageHex, poolPublicKey }) {
+    assertRpc(rpc);
+    assertPoolKey(poolPublicKey);
+    assertIdentityCapabilities(identity, ["openReply"]);
+    if (typeof messageHex !== "string" || messageHex.length === 0) {
+      throw new DepinProtocolError("messageHex is required");
+    }
+    const parsed = await parseDepinMessage(messageHex);
+    if (parsed.senderAddress !== identity.address) {
+      throw new DepinProtocolError(
+        "message senderAddress '" + parsed.senderAddress + "' does not match the identity address '" + identity.address + "'"
+      );
+    }
+    const envelope = await wrapMessageForServer(messageHex, poolPublicKey, identity.address);
+    const reply = await rpc.call("depinsubmitmsg", [envelope]);
+    const verified = verifyDepinReply({
+      reply,
+      method: "depinsubmitmsg",
+      token: parsed.token,
+      address: identity.address,
+      challenge: "",
+      poolPublicKey
+    });
+    const opened = await openBoundReply(verified, identity.openReply);
+    return decodeSubmitResult(opened);
   }
 
   // src/index.js
@@ -4336,18 +5247,48 @@ var neuraiDepinMsg = (() => {
       getDepinTokenAncestors,
       parseDepinMessage,
       verifyDepinReceivedMessage,
-      isPreAuthenticatedSentinel,
       decodeDepinReceiveResponse,
       decryptDepinReceivedMessage,
       validateAndDecryptDepinMessage,
       decryptDepinReceiveEncryptedPayload,
+      NEURAI_MESSAGE_MAGIC,
+      neuraiSignedMessageHash,
+      signRecoverableMessage,
+      recoverPublicKeyFromMessage,
+      verifyRecoverableMessage,
+      decodeWIF,
+      buildDepinRequestPreimage,
+      buildDepinGetPreimage,
+      buildDepinClearPreimage,
+      isVerifiedDepinReply,
+      buildDepinReplyPreimage,
+      verifyDepinReply,
+      decodePlainReply,
+      openBoundReply,
+      decodeDepinPoolInfo,
+      poolKeyFingerprint,
+      createSoftwareIdentity,
+      assertIdentityCapabilities,
+      getDepinPoolInfo,
+      decodeDepinRecipients,
       resolveDepinRecipients,
       buildDepinMessageForPool,
-      parseDepinPoolInfo,
-      getRemoteDepinPoolInfo,
-      buildDepinMessageForRemotePool,
+      requestDepinChallenge,
+      decodeChallengeResult,
+      receiveDepinMessages,
+      listDepinSectionsPublic,
+      listDepinSectionsPrivate,
+      clearDepinMessages,
+      submitDepinMessage,
+      decodeSubmitResult,
       wrapMessageForServer,
       unwrapMessageFromServer,
+      DepinError,
+      DepinProtocolError,
+      DepinReplyAuthenticationError,
+      DepinReplyDecryptionError,
+      PoolPinMismatchError,
+      DepinCapabilityError,
       wifToHex,
       isWIF,
       MAX_DEPIN_RECIPIENTS,
@@ -4365,8 +5306,12 @@ var neuraiDepinMsg = (() => {
         ripemd160: ripemd1603,
         hash160,
         kdfSha256,
+        base58Encode,
+        base58CheckEncode,
         base58Decode,
         base58CheckDecode,
+        base64Encode,
+        base64Decode,
         normalizePrivateKeyTo32Bytes,
         parsePublicKey,
         derivePublicKeyForms,

@@ -8,9 +8,15 @@ runs in browsers, Node.js (>= 18) and React Native (Hermes) without
 `crypto.subtle` or native modules.
 
 The library never opens network connections. Applications inject an
-`rpc.call(method, params)` function (node JSON-RPC) and, for remote pools, a
-`transport.request(host, port, payload)` function, and keep full control of
-transports, TLS, authentication and CORS.
+`rpc.call(method, params)` function (node JSON-RPC), and keep full control of
+transport, TLS, authentication and CORS.
+
+**Protocol 2** (this is 3.x): every operation is a single JSON-RPC call on
+the node's RPC port — there is no separate gateway port or socket. Every
+DePIN reply is a signed envelope (`poolsig`), and this library **verifies it
+against the pinned pool key before decrypting or interpreting anything**.
+Reads and purges authenticate per call with a single-use challenge signed by
+the holder's key. See "Migrating from 2.x" below for the removed surface.
 
 ```
 npm install @neuraiproject/neurai-depin-msg
@@ -84,129 +90,145 @@ authentication: real visibility is the cryptographic recipient list inside
 each message. Treat the RPC as an untrusted retrieval endpoint and rely on
 the local validation above.
 
-### Pre-authenticated gateway messages
+Protocol 1's pre-authenticated gateway sentinel (65 zero bytes in place of a
+signature) can no longer arrive over protocol 2; if one appears it is
+**always rejected** (`ok: false`, `authentication: 'invalid'`,
+`reason: 'protocol-1-preauthenticated'`). There is no trust-gateway option.
 
-Messages sent through `depinsendmsg`'s gateway path carry a 65-byte all-zero
-sentinel instead of a signature; Core authorized them via the gateway
-challenge/response, which the client cannot re-verify. By default they are
-**rejected** (`ok: false`, `authentication: 'gateway-preauthenticated'`).
-Pass `preAuthenticatedPolicy: 'trust-gateway'` only when the application
-authenticates and trusts the serving gateway session; even then
-`signatureValid` stays `false`.
+## High-level flows (protocol 2)
 
-## Sending
-
-### 1. Resolve recipients and build (local pool)
+The client-flow helpers take an injected `rpc`, the **pinned pool key**, and
+an **identity** (its capabilities), authenticate every reply, and return
+decrypted results. Identities separate the two protocol-2 signatures and the
+decryptor: `signMessage` (recoverable, for DEPIN-REQ/GET/CLEAR), `signDigest`
+(the message's ECDSA digest, publishing only) and `openReply` (decrypts bound
+replies). `createSoftwareIdentity` builds them from a local key; a hardware
+wallet implements the same three callbacks without exporting the key.
 
 ```js
-import { buildDepinMessageForPool } from '@neuraiproject/neurai-depin-msg';
+import {
+  getDepinPoolInfo, listDepinSectionsPublic,
+  requestDepinChallenge, receiveDepinMessages,
+  buildDepinMessageForPool, submitDepinMessage,
+  createSoftwareIdentity,
+} from '@neuraiproject/neurai-depin-msg';
 
 const rpc = { call: (method, params) => myNodeRpc(method, params) };
 
-const { hex, messageHash, resolution } = await buildDepinMessageForPool({
-  token: '&NEWS/GENERAL',
-  poolRoot: '&NEWS',        // the pool's configured root (stop_at)
-  maxRecipients: 20,        // the pool's -depinmsgmaxusers (absolute cap 50)
-  rpc,
-  network: 'mainnet',
-  senderAddress, senderPubKey, privateKey,
-  message: 'hello sections', messageType: 'group',
-  timestamp: Math.floor(Date.now() / 1000),
+// 1. Bootstrap and PIN the pool (service identity + root + key). Trust modes:
+//    { mode: 'pinned', pin } — enforce a full pin you already stored;
+//    { mode: 'key', poolPublicKey } — key shipped, learn the root from a
+//        verified body; { mode: 'tofu' } — first contact, records the pin
+//    OBSERVED (persist it after your own confirmation).
+const { info, pin, fingerprint } = await getDepinPoolInfo({
+  rpc, serviceId: 'https://pool.example/rpc', trust: { mode: 'tofu' }, network: 'mainnet',
 });
-await rpc.call('depinsubmitmsg', [hex]);
+const poolPublicKey = pin.poolPublicKey;
+
+// 2. Public section list (plain reply, poolsig bound to the pool root).
+const { sections } = await listDepinSectionsPublic({ rpc, poolRoot: pin.poolRoot, poolPublicKey });
+
+// 3. Read loop for (token, address): challenge → receive → chain.
+const identity = await createSoftwareIdentity({ privateKey: holderWif, network: 'mainnet' });
+const ch = await requestDepinChallenge({ rpc, identity, token: '&NEWS/GENERAL', poolPublicKey });
+let page = await receiveDepinMessages({
+  rpc, identity, token: '&NEWS/GENERAL', challenge: ch.challenge,
+  poolPublicKey, network: 'mainnet', limit: 25,
+  resolveSenderPubKey: async (addr) => myPubkeyCache(addr), // getpubkey, cacheable
+});
+for (const m of page.messages) if (m.ok) console.log(m.message.sender, m.plaintext);
+// Keep reading within 300 s without another depinchallenge:
+if (page.hasMore) page = await receiveDepinMessages({
+  rpc, identity, token: '&NEWS/GENERAL', challenge: page.nextChallenge,
+  poolPublicKey, network: 'mainnet', afterHash: page.messages.at(-1)?.hash ?? '',
+});
+
+// 4. Publish: resolve recipients (a SIGNED envelope), build, submit.
+const built = await buildDepinMessageForPool({
+  rpc, token: '&NEWS/GENERAL', poolRoot: pin.poolRoot,
+  maxRecipients: info.maxrecipients, poolPublicKey, network: 'mainnet',
+  senderAddress: identity.address, senderPubKey: identity.publicKey, privateKey: holderWif,
+  message: 'hello sections', messageType: 'group', timestamp: Math.floor(Date.now() / 1000),
+});
+const receipt = await submitDepinMessage({ rpc, identity, messageHex: built.hex, poolPublicKey });
+// receipt = { result: 'success', hash, ... } from a reply bound to the sender.
 ```
 
-`resolveDepinRecipients` enforces the pool contract and **fails closed**: a
-`truncated` response is never used, every returned key must hash to its own
-address, holders are deduplicated by curve point, and the *final* ECIES map
-(recipients ∪ auto-included sender) must fit `maxRecipients` — Core applies
-the limit to that map, so an over-limit message would be rejected anyway.
+`buildDepinMessageForPool` / `resolveDepinRecipients` enforce the pool
+contract and **fail closed**: the recipients reply's `poolsig` is verified
+first, a `truncated` response is never used, every returned key must hash to
+its own address, holders dedupe by curve point, and the *final* ECIES map
+(recipients ∪ auto-included sender) must fit `maxRecipients`.
 
 > The node answering `depingetancestorrecipients` is a **trust root** for
-> confidentiality: the library can check the response's internal consistency,
-> but not that the holder set itself is honest. Resolve recipients against a
-> node you trust.
+> confidentiality: the library authenticates that the reply came from the
+> pinned service and checks its internal consistency, but not that the holder
+> set itself is honest.
 
-### 2. Remote pools
+Purging is `clearDepinMessages` with an `admin` challenge (owner access);
+`scope: ''` targets the whole pool (verified against the pool root).
+`listDepinSectionsPrivate` is the address-scoped section list.
 
-```js
-const transport = { request: (host, port, payload) => myTcpRequest(host, port, payload) };
-const out = await buildDepinMessageForRemotePool({
-  host, port, transport, rpc,
-  token: '&NEWS/GENERAL', network: 'mainnet',
-  senderAddress, senderPubKey, privateKey,
-  message: 'hi', messageType: 'group',
-  timestamp: Math.floor(Date.now() / 1000),
-});
-```
+### External signers (hardware wallets)
 
-The remote pool's `INFO` is queried first; its root becomes `stop_at` and its
-limit becomes `maxRecipients`. If `INFO` fails or is unrecognized, the build
-fails — never encrypt for a pool whose contract you could not read.
-
-Alternatively, Core's wallet-backed `depinsendmsg` performs the gateway
-`AUTH` challenge itself; that TCP flow is intentionally out of scope here
-(implement it in an application adapter if needed).
-
-### 3. External signers (hardware wallets)
-
-`buildDepinPreimage` encrypts and returns the fields to sign;
-`assembleDepinMessage` combines them with the DER (or compact 64-byte)
-signature into the final wire format. The private key never touches the
-library.
-
-## Transport privacy wrapper
-
-`wrapMessageForServer` / `unwrapMessageFromServer` ECIES-wrap traffic for a
-pool's key. This hides content from the transport only — it does **not**
-authenticate the server. Same for the `{encrypted}` response wrapper:
-authenticate the RPC transport separately when that property matters.
+Provide an identity whose `signMessage` / `signDigest` / `openReply` are
+backed by the device. For one-off message assembly, `buildDepinPreimage`
+encrypts and returns the digest to sign and `assembleDepinMessage` combines
+it with the DER (or compact 64-byte) signature. The private key never touches
+the library.
 
 ## Utilities
 
 `validateDepinSectionToken`, `isDepinTokenInScope`, `getDepinTokenAncestors`,
-`parseDepinMessage`, `verifyDepinReceivedMessage`, `parseDepinPoolInfo`,
-key/address helpers (`parsePublicKey`, `decodeP2PKHAddress`,
-`pubKeyMatchesAddress`, `wifToHex`...) and the ECIES primitives are all
-exported — see `index.d.ts` for the full typed surface.
+`parseDepinMessage`, `verifyDepinReceivedMessage`, the reply/pin primitives
+(`verifyDepinReply`, `decodePlainReply`, `openBoundReply`,
+`decodeDepinPoolInfo`, `poolKeyFingerprint`), the signature primitives
+(`signRecoverableMessage`, `recoverPublicKeyFromMessage`,
+`verifyRecoverableMessage`, `decodeWIF`), key/address helpers and the ECIES
+primitives are all exported — see `index.d.ts` for the full typed surface.
+Errors are typed with stable `code`s: `DepinProtocolError`,
+`DepinReplyAuthenticationError`, `DepinReplyDecryptionError`,
+`PoolPinMismatchError`, `DepinCapabilityError`.
 
 Public keys are accepted in both serializations (33-byte compressed and
 65-byte uncompressed) everywhere, matching Core; identity comparisons are by
 curve point, while `hash160`/address bindings always use the exact bytes.
 
+## Migrating from 2.x
+
+3.0.0 implements DePIN Messaging Protocol 2 and removes the protocol-1
+surface (breaking):
+
+- **Removed**: `parseDepinPoolInfo`, `getRemoteDepinPoolInfo`,
+  `buildDepinMessageForRemotePool` and the `DepinTransport` type — the TCP
+  gateway (`INFO`/`AUTH`, port 19002) no longer exists on the node.
+  `depingetmsginfo` is now a JSON-RPC call returning a signed `{body}`;
+  use `getDepinPoolInfo`.
+- **Removed**: the `preAuthenticatedPolicy: 'trust-gateway'` option and the
+  `isPreAuthenticatedSentinel` export. The sentinel is always rejected.
+  `Authentication` no longer includes `'gateway-preauthenticated'`.
+- **Added**: recoverable `signmessage` signatures, reply-envelope
+  verification (`poolsig`) with pinning/TOFU, identities and capabilities,
+  and the client flows above. `resolveDepinRecipients` now requires
+  `poolPublicKey` and verifies the reply envelope (its shape is unchanged);
+  the pure `decodeDepinRecipients` decodes an already-verified body.
+- `decodeDepinReceiveResponse` now also returns `nextChallenge` /
+  `nextExpiresIn` for challenge chaining.
+
+The message wire format (§5) and the ECIES envelope (§4) are unchanged: a
+message built with 2.x `buildDepinMessage` is still valid.
+
 ## Testing
 
 ```
-npm test                 # runs against committed Core-generated fixtures
-npm run gen-fixtures     # regenerates fixtures against a throwaway neuraid regtest
+npm test                 # builds, runs the suite + the package gate
 ```
 
-`scripts/generate-fixtures.mjs` drives a real `neuraid` (set
-`NEURAI_BIN_DIR`): issues `&FIXTURE` and `&FIXTURE/NEWS`, reveals compressed
-and uncompressed keys, submits library-built messages (Core's acceptance
-validates serialization, hash and signature) and captures
-`depinreceivemsg` / `depingetancestorrecipients` / gateway `INFO` responses.
-
-## 2.3.0 changes
-
-- New: full non-custodial receive pipeline, recipient resolution, remote
-  pool helpers, token/scope utilities, message parsing and verification.
-- Signature verification uses only the unified hash (`messageType`
-  included); legacy signatures are rejected — requires a Core with the
-  unified signing (2026-07 or later).
-- Pre-authenticated gateway sentinels are rejected unless the application
-  explicitly opts into trusting the gateway.
-- Uncompressed (65-byte) public keys supported end to end; decryption tries
-  both forms of the recipient key.
-- `buildDepinMessage` now validates key coherence (privateKey ↔ senderPubKey
-  ↔ senderAddress), token syntax, and the final recipient map size —
-  messages Core would reject now fail at build time.
-- Stricter parsing everywhere: canonical CompactSize, no duplicate recipient
-  ids, no trailing bytes, validated hex. ECIES map entries serialize in
-  Core's `std::map<uint160,...>` numeric order.
-- Packaging: ESM + CJS entries with an `exports` map, TypeScript
-  definitions, `buildDepinPreimage`/`assembleDepinMessage` properly exported.
-- Removed `console.log` noise from the build path.
+The suite verifies the official protocol-2 vectors (spec §13,
+`test/fixtures/protocol2-vectors.txt`, a checksum-pinned copy of the node's
+`contrib/depin/vectors.txt`): recoverable signatures byte-for-byte (§13.2/5),
+`poolsig` on plain and bound replies (§13.3–13.6) and the full negative table
+(§13.7). Client flows run against a scripted RPC with signed fixtures.
 
 ## License
 

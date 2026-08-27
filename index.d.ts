@@ -1,11 +1,13 @@
 /**
- * Type definitions for @neuraiproject/neurai-depin-msg 2.3.0
+ * Type definitions for @neuraiproject/neurai-depin-msg 3.0.0
+ * (DePIN Messaging Protocol 2)
  */
 
 export type Network = 'mainnet' | 'test' | 'testnet' | 'regtest';
 export type MessageType = 'private' | 'group';
-export type Authentication = 'signature' | 'gateway-preauthenticated' | 'invalid';
-export type PreAuthenticatedPolicy = 'reject' | 'trust-gateway';
+/** Protocol 2: the protocol-1 gateway sentinel is always 'invalid'
+ *  (reason 'protocol-1-preauthenticated'). */
+export type Authentication = 'signature' | 'invalid';
 
 // ---------------------------------------------------------------------------
 // Build / sign
@@ -122,8 +124,6 @@ export function verifyDepinReceivedMessage(
   options: VerifyOptions
 ): Promise<VerifyResult>;
 
-export function isPreAuthenticatedSentinel(signatureBytes: Uint8Array): boolean;
-
 // ---------------------------------------------------------------------------
 // Non-custodial reception
 // ---------------------------------------------------------------------------
@@ -135,9 +135,11 @@ export interface ReceiveLimits {
 
 export interface ValidateAndDecryptOptions extends VerifyOptions {
   privateKey?: string | null;
+  /** External ECIES opener (hardware): receives the raw payload bytes and
+   *  returns plaintext, or null when the key is not among the recipients. */
+  openPayload?: ((payloadBytes: Uint8Array) => Promise<Uint8Array | string | null> | Uint8Array | string | null) | null;
   requestedToken?: string | null;
   limits?: ReceiveLimits;
-  preAuthenticatedPolicy?: PreAuthenticatedPolicy;
 }
 
 export interface ValidatedDepinMessage {
@@ -161,6 +163,9 @@ export interface DecodedReceiveResponse {
   messages: ValidatedDepinMessage[];
   hasMore: boolean | null;
   wasEncrypted: boolean;
+  /** Protocol-2 challenge chaining (300 s), when the reply carries it. */
+  nextChallenge: string | null;
+  nextExpiresIn: number | null;
 }
 
 export function decodeDepinReceiveResponse(
@@ -186,10 +191,6 @@ export interface DepinRpc {
   call(method: string, params: unknown[]): Promise<unknown>;
 }
 
-export interface DepinTransport {
-  request(host: string, port: number, payload: string): Promise<string>;
-}
-
 export interface ResolveDepinRecipientsParams {
   token: string;
   poolRoot: string;
@@ -197,6 +198,9 @@ export interface ResolveDepinRecipientsParams {
   maxRecipients: number;
   senderPubKey: string;
   rpc: DepinRpc;
+  /** Pinned pool key: the reply envelope is verified against it BEFORE the
+   *  recipients are interpreted. */
+  poolPublicKey: string;
   network?: Network;
 }
 
@@ -228,38 +232,11 @@ export function buildDepinMessageForPool(
   params: ResolveDepinRecipientsParams & Omit<BuildDepinMessageParams, 'recipientPubKeys'>
 ): Promise<BuildDepinMessageResult & { resolution: DepinRecipientsResolution }>;
 
-export interface DepinPoolInfo {
-  token: string;
-  port: number;
-  cipher: string;
-  /** Reported limit clamped to Core's absolute maximum of 50. */
-  maxRecipients: number;
-  maxMessageSize: number;
-  messageExpiryHours: number;
-  maxPoolSizeMB: number;
-  messageCount: number;
-  memoryUsage: number;
-  oldestMessage: string;
-  newestMessage: string;
-  poolPubKey: string | null;
-  raw: string;
-}
-
-export function parseDepinPoolInfo(raw: string): DepinPoolInfo;
-
-export function getRemoteDepinPoolInfo(params: {
-  host: string;
-  port: number;
-  transport: DepinTransport;
-}): Promise<DepinPoolInfo>;
-
-export function buildDepinMessageForRemotePool(
-  params: { host: string; port: number; transport: DepinTransport; rpc: DepinRpc } &
-    Omit<BuildDepinMessageParams, 'recipientPubKeys'>
-): Promise<BuildDepinMessageResult & {
-  resolution: DepinRecipientsResolution;
-  poolInfo: DepinPoolInfo;
-}>;
+/** Pure decoder for an already verified/decoded recipients body. */
+export function decodeDepinRecipients(
+  body: unknown,
+  params: Omit<ResolveDepinRecipientsParams, 'rpc' | 'poolPublicKey'>
+): Promise<DepinRecipientsResolution>;
 
 // ---------------------------------------------------------------------------
 // Transport privacy wrapper
@@ -332,6 +309,8 @@ export function doubleSha256(data: Uint8Array): Promise<Uint8Array>;
 export function ripemd160(data: Uint8Array): Uint8Array;
 export function hash160(data: Uint8Array): Promise<Uint8Array>;
 export function kdfSha256(sharedSecret: Uint8Array, outputLen: number): Promise<Uint8Array>;
+export function base58Encode(bytes: Uint8Array): string;
+export function base58CheckEncode(version: number, payload: Uint8Array): Promise<string>;
 export function base58Decode(str: string): Uint8Array;
 export function base58CheckDecode(str: string): Promise<{ version: number; payload: Uint8Array }>;
 
@@ -367,3 +346,297 @@ export const MAX_DEPIN_TOKEN_LENGTH: number;
 
 /** Test-only deterministic RNG hook. Never call in production. */
 export function _setDepinTestRng(fn: ((len: number) => Uint8Array) | null): void;
+
+// ---------------------------------------------------------------------------
+// Protocol 2 — errors (stable codes)
+// ---------------------------------------------------------------------------
+
+export class DepinError extends Error {
+  code: string;
+  cause?: unknown;
+}
+/** Malformed shape, encoding, limits or invariant violations. */
+export class DepinProtocolError extends DepinError { code: 'DEPIN_PROTOCOL'; }
+/** poolsig invalid, or key/address inconsistent with the reply. */
+export class DepinReplyAuthenticationError extends DepinError { code: 'DEPIN_REPLY_AUTH'; }
+/** An authenticated reply that cannot be opened/decrypted. */
+export class DepinReplyDecryptionError extends DepinError { code: 'DEPIN_REPLY_DECRYPT'; }
+/** Service identity, pool root or pool key differ from the recorded pin. */
+export class PoolPinMismatchError extends DepinError { code: 'DEPIN_PIN_MISMATCH'; }
+/** A flow was invoked without a required signing/opening capability. */
+export class DepinCapabilityError extends DepinError { code: 'DEPIN_CAPABILITY'; }
+
+// ---------------------------------------------------------------------------
+// Protocol 2 — signmessage-compatible recoverable signatures (spec 3.3)
+// ---------------------------------------------------------------------------
+
+export const NEURAI_MESSAGE_MAGIC: string;
+
+export function base64Encode(bytes: Uint8Array): string;
+export function base64Decode(str: string): Uint8Array;
+
+/** Decodes a WIF keeping network and compression flag. */
+export function decodeWIF(wif: string): {
+  privateKey: Uint8Array;
+  compressed: boolean;
+  network: 'mainnet' | 'test';
+};
+
+export function neuraiSignedMessageHash(message: string): Uint8Array;
+/** Deterministic (RFC 6979, low-s). Rejects uncompressed WIFs. */
+export function signRecoverableMessage(
+  message: string,
+  privateKeyOrCompressedWif: string
+): string;
+export function recoverPublicKeyFromMessage(message: string, signatureBase64: string): string;
+/** Throws for malformed input; false for a valid signature by another key. */
+export function verifyRecoverableMessage(
+  message: string,
+  signatureBase64: string,
+  expectedPublicKey: string | Uint8Array
+): boolean;
+
+/** DEPIN-REQ|type|token|address|ms (spec 7.1). */
+export function buildDepinRequestPreimage(params: {
+  type?: 'receive' | 'admin';
+  token: string;
+  address: string;
+  timestampMs: number;
+}): string;
+/** DEPIN-GET|token|address|challenge (spec 7.2). */
+export function buildDepinGetPreimage(params: {
+  token: string;
+  address: string;
+  challenge: string;
+}): string;
+/** DEPIN-CLEAR|scope|address|challenge (spec 7.2). */
+export function buildDepinClearPreimage(params: {
+  scope: string;
+  address: string;
+  challenge: string;
+}): string;
+
+// ---------------------------------------------------------------------------
+// Protocol 2 — reply envelopes, pin and TOFU (spec 6.2-6.4)
+// ---------------------------------------------------------------------------
+
+export interface PlainDepinReply { body: string; poolsig: string; }
+export interface BoundDepinReply { encrypted: string; poolsig: string; }
+
+declare const VERIFIED_REPLY: unique symbol;
+/** Branded by verifyDepinReply; cannot be fabricated by callers. */
+export interface VerifiedDepinReply {
+  readonly [VERIFIED_REPLY]: true;
+  readonly kind: 'plain' | 'bound';
+  readonly replyHex: string;
+  readonly method: string;
+  readonly token: string;
+  readonly address: string;
+  readonly challenge: string;
+  readonly poolPublicKey: string;
+}
+
+export function isVerifiedDepinReply(value: unknown): value is VerifiedDepinReply;
+
+export function buildDepinReplyPreimage(params: {
+  method: string;
+  token?: string;
+  address?: string;
+  challenge?: string;
+  replyHex: string;
+}): string;
+
+/** Verifies poolsig over the reply hex EXACTLY as received. Throws
+ *  DepinReplyAuthenticationError when it does not recover to the key. */
+export function verifyDepinReply(params: {
+  reply: unknown;
+  method: string;
+  token?: string;
+  address?: string;
+  challenge?: string;
+  poolPublicKey: string | Uint8Array;
+}): VerifiedDepinReply;
+
+export function decodePlainReply(verifiedReply: VerifiedDepinReply): Record<string, unknown>;
+
+export type OpenReply = (
+  encryptedHex: string
+) => Promise<Uint8Array | string> | Uint8Array | string;
+
+export function openBoundReply(
+  verifiedReply: VerifiedDepinReply,
+  opener: string | OpenReply
+): Promise<Record<string, unknown>>;
+
+export interface PoolPin {
+  serviceId: string;
+  poolRoot: string;
+  poolPublicKey: string;
+}
+
+export type PoolTrust =
+  | { mode: 'pinned'; pin: PoolPin }
+  | { mode: 'key'; poolPublicKey: string }
+  | { mode: 'tofu' };
+
+export interface DepinPoolInfoResult {
+  info: Record<string, unknown> & {
+    token: string;
+    maxrecipients: number;
+    protocol: number;
+    depinpoolpkey: string;
+    depinpoolkeyaddress?: string;
+  };
+  /** What the application should persist. TOFU returns it as OBSERVED. */
+  pin: PoolPin;
+  trust: 'pinned' | 'key' | 'tofu';
+  fingerprint: string;
+}
+
+export function decodeDepinPoolInfo(params: {
+  reply: unknown;
+  trust: PoolTrust;
+  serviceId: string;
+  network?: Network;
+}): Promise<DepinPoolInfoResult>;
+
+export function poolKeyFingerprint(pubKey: string | Uint8Array): string;
+
+// ---------------------------------------------------------------------------
+// Protocol 2 — identities and capabilities
+// ---------------------------------------------------------------------------
+
+export type SignMessage = (preimage: string) => Promise<string> | string;
+export type SignDigest = (
+  digest: Uint8Array
+) => Promise<Uint8Array | string> | Uint8Array | string;
+
+export interface HolderIdentity {
+  address: string;
+  signMessage: SignMessage;
+  openReply: OpenReply;
+}
+
+export interface SenderIdentity extends HolderIdentity {
+  /** SEC1 compressed, 33 bytes, hex lowercase. */
+  publicKey: string;
+  signDigest: SignDigest;
+}
+
+export function createSoftwareIdentity(params: {
+  privateKey: string;
+  network: Network;
+  address?: string;
+}): Promise<SenderIdentity & { network: 'mainnet' | 'test' }>;
+
+export function assertIdentityCapabilities(
+  identity: unknown,
+  capabilities: Array<'signMessage' | 'signDigest' | 'openReply'>
+): void;
+
+// ---------------------------------------------------------------------------
+// Protocol 2 — client flows (network injected)
+// ---------------------------------------------------------------------------
+
+export function getDepinPoolInfo(params: {
+  rpc: DepinRpc;
+  serviceId: string;
+  trust: PoolTrust;
+  network?: Network;
+}): Promise<DepinPoolInfoResult>;
+
+export interface ChallengeResult {
+  challenge: string;
+  expiresIn: number | null;
+  type: 'receive' | 'admin';
+  timestampMs: number;
+}
+
+export function requestDepinChallenge(params: {
+  rpc: DepinRpc;
+  identity: HolderIdentity;
+  token: string;
+  poolPublicKey: string | Uint8Array;
+  type?: 'receive' | 'admin';
+  timestampMs?: number;
+  clock?: () => number;
+}): Promise<ChallengeResult>;
+
+export function decodeChallengeResult(
+  opened: unknown,
+  expectedType: 'receive' | 'admin'
+): Omit<ChallengeResult, 'timestampMs'>;
+
+export interface ReceiveMessagesResult {
+  messages: ValidatedDepinMessage[];
+  hasMore: boolean | null;
+  nextChallenge: string | null;
+  nextExpiresIn: number | null;
+  raw: Record<string, unknown>;
+}
+
+export function receiveDepinMessages(params: {
+  rpc: DepinRpc;
+  identity: HolderIdentity;
+  token: string;
+  challenge: string;
+  poolPublicKey: string | Uint8Array;
+  network: Network;
+  afterHash?: string;
+  limit?: number;
+  /** Unix seconds; the node filters timestamp >= (timestamp - 1). */
+  timestamp?: number;
+  requestedToken?: string;
+  resolveSenderPubKey?: (address: string) => string | Promise<string>;
+  limits?: ReceiveLimits;
+}): Promise<ReceiveMessagesResult>;
+
+export interface DepinSection {
+  name: string;
+  label?: string;
+  depth?: number;
+  access?: string;
+  messages?: number;
+  [key: string]: unknown;
+}
+
+export function listDepinSectionsPublic(params: {
+  rpc: DepinRpc;
+  poolRoot: string;
+  poolPublicKey: string | Uint8Array;
+}): Promise<{ sections: DepinSection[] }>;
+
+export function listDepinSectionsPrivate(params: {
+  rpc: DepinRpc;
+  identity: HolderIdentity;
+  scope: string;
+  challenge: string;
+  poolPublicKey: string | Uint8Array;
+}): Promise<{
+  sections: DepinSection[];
+  nextChallenge: string | null;
+  nextExpiresIn: number | null;
+}>;
+
+/** scope '' purges the whole pool: the preimage and the reply verification
+ *  use poolRoot even though the RPC receives ''. */
+export function clearDepinMessages(params: {
+  rpc: DepinRpc;
+  identity: HolderIdentity;
+  scope?: string;
+  poolRoot: string;
+  challenge: string;
+  poolPublicKey: string | Uint8Array;
+  mode?: 'all' | number;
+}): Promise<Record<string, unknown>>;
+
+export function submitDepinMessage(params: {
+  rpc: DepinRpc;
+  identity: HolderIdentity;
+  messageHex: string;
+  poolPublicKey: string | Uint8Array;
+}): Promise<Record<string, unknown> & { result: 'success'; hash: string }>;
+
+export function decodeSubmitResult(
+  opened: unknown
+): Record<string, unknown> & { result: 'success'; hash: string };

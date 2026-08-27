@@ -66,30 +66,31 @@ async function decryptDepinReceivedMessage(message, privateKey) {
  * options:
  *   network            required for signature verification
  *   privateKey         optional; when given the payload is decrypted
+ *   openPayload        optional callback `(payloadBytes) => bytes|string|null`
+ *                      for external decryptors (hardware); alternative to
+ *                      privateKey — `null` means "not for this recipient"
  *   requestedToken     optional; the message token must be in this scope
  *   limits             { maxPayloadBytes }
- *   preAuthenticatedPolicy  'reject' (default) | 'trust-gateway'
  *   senderPubKey / resolveSenderPubKey  optional verification fast path
  *
  * Returns { ok, reason, hash, message, signatureValid, authentication,
  * senderPubKey, plaintext }. `ok: false` means the message failed validation
  * and must not be displayed. `plaintext` is null when the key was not among
  * the recipients (that alone does not make ok false).
+ *
+ * Protocol 2: the protocol-1 pre-authenticated gateway sentinel (65 zero
+ * bytes in place of the signature) is ALWAYS rejected — no policy option.
  */
 async function validateAndDecryptDepinMessage(message, options = {}) {
   const {
     network,
     privateKey = null,
+    openPayload = null,
     requestedToken = null,
     limits = {},
-    preAuthenticatedPolicy = 'reject',
     senderPubKey = null,
     resolveSenderPubKey = null
   } = options;
-
-  if (preAuthenticatedPolicy !== 'reject' && preAuthenticatedPolicy !== 'trust-gateway') {
-    throw new Error("preAuthenticatedPolicy must be 'reject' or 'trust-gateway'");
-  }
 
   const effLimits = { ...DEFAULT_LIMITS, ...limits };
 
@@ -141,11 +142,12 @@ async function validateAndDecryptDepinMessage(message, options = {}) {
   result.senderPubKey = verification.senderPubKey;
 
   if (verification.authentication === 'gateway-preauthenticated') {
-    if (preAuthenticatedPolicy !== 'trust-gateway') {
-      result.reason = 'pre-authenticated gateway message rejected by policy';
-      return result;
-    }
-  } else if (!verification.signatureValid) {
+    // Protocol 1 leftover: cryptographically unverifiable, always rejected.
+    result.authentication = 'invalid';
+    result.reason = 'protocol-1-preauthenticated';
+    return result;
+  }
+  if (!verification.signatureValid) {
     result.reason = verification.reason || 'signature verification failed';
     return result;
   }
@@ -165,6 +167,28 @@ async function validateAndDecryptDepinMessage(message, options = {}) {
       result.ok = false;
       result.reason = 'encrypted payload is malformed: ' + e.message;
       return result;
+    }
+  } else if (openPayload !== null) {
+    if (typeof openPayload !== 'function') {
+      throw new Error('options.openPayload must be a function');
+    }
+    try {
+      // Structural check stays local so a malformed payload is still ok:false
+      // even when the external opener would reject it for other reasons.
+      deserializeEciesMessage(norm.encryptedPayload);
+    } catch (e) {
+      result.ok = false;
+      result.reason = 'encrypted payload is malformed: ' + e.message;
+      return result;
+    }
+    try {
+      const out = await openPayload(norm.encryptedPayload);
+      if (out !== null && out !== undefined) {
+        result.plaintext =
+          typeof out === 'string' ? out : new TextDecoder().decode(out);
+      }
+    } catch {
+      // External opener failure: leave plaintext null (not for this key).
     }
   }
 
@@ -242,7 +266,20 @@ async function decodeDepinReceiveResponse(rpcResult, options = {}) {
     messages.push(entry);
   }
 
-  return { messages, hasMore, wasEncrypted };
+  // Protocol 2 challenge chaining (§7.3), when the reply carries it.
+  let nextChallenge = null;
+  let nextExpiresIn = null;
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    if (typeof payload.next_challenge === 'string' &&
+        /^[0-9a-f]{64}$/.test(payload.next_challenge)) {
+      nextChallenge = payload.next_challenge;
+      if (typeof payload.next_expires_in === 'number') {
+        nextExpiresIn = payload.next_expires_in;
+      }
+    }
+  }
+
+  return { messages, hasMore, wasEncrypted, nextChallenge, nextExpiresIn };
 }
 
 /**

@@ -9,16 +9,36 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 
-test('root require resolves to the CJS bundle', () => {
+test('root require resolves to the CJS bundle with the 3.0.0 surface', () => {
   const m = require('@neuraiproject/neurai-depin-msg');
   assert.equal(typeof m.buildDepinMessage, 'function');
   assert.equal(typeof m.decodeDepinReceiveResponse, 'function');
+  // protocol-2 API present
+  assert.equal(typeof m.signRecoverableMessage, 'function');
+  assert.equal(typeof m.verifyDepinReply, 'function');
+  assert.equal(typeof m.decodeDepinPoolInfo, 'function');
+  assert.equal(typeof m.createSoftwareIdentity, 'function');
+  assert.equal(typeof m.requestDepinChallenge, 'function');
+  assert.equal(typeof m.receiveDepinMessages, 'function');
+  assert.equal(typeof m.submitDepinMessage, 'function');
+  assert.equal(typeof m.clearDepinMessages, 'function');
+  // protocol-1 surface retired
+  assert.equal(m.parseDepinPoolInfo, undefined);
+  assert.equal(m.getRemoteDepinPoolInfo, undefined);
+  assert.equal(m.buildDepinMessageForRemotePool, undefined);
+  assert.equal(m.isPreAuthenticatedSentinel, undefined);
 });
 
-test('root import resolves to the ESM bundle', async () => {
+test('root import resolves to the ESM bundle with the 3.0.0 surface', async () => {
   const m = await import('@neuraiproject/neurai-depin-msg');
   assert.equal(typeof m.buildDepinMessage, 'function');
   assert.equal(typeof m.resolveDepinRecipients, 'function');
+  assert.equal(typeof m.verifyDepinReply, 'function');
+  assert.equal(typeof m.requestDepinChallenge, 'function');
+  assert.equal(m.parseDepinPoolInfo, undefined);
+  assert.equal(m.getRemoteDepinPoolInfo, undefined);
+  assert.equal(m.buildDepinMessageForRemotePool, undefined);
+  assert.equal(m.isPreAuthenticatedSentinel, undefined);
 });
 
 test('legacy dist subpaths stay importable (2.2.1 compat)', () => {

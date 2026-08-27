@@ -1,10 +1,42 @@
 /**
- * Base58 / Base58Check decoding (Neurai addresses and WIF keys).
+ * Base58 / Base58Check encoding and decoding (Neurai addresses and WIF keys).
  */
 
 import { doubleSha256 } from './hash.js';
+import { concatBytes } from './bytes.js';
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+function base58Encode(bytes) {
+  if (!(bytes instanceof Uint8Array)) throw new Error('base58Encode expects Uint8Array');
+  const digits = [0];
+  for (const byte of bytes) {
+    let carry = byte;
+    for (let j = 0; j < digits.length; j++) {
+      carry += digits[j] << 8;
+      digits[j] = carry % 58;
+      carry = (carry / 58) | 0;
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = (carry / 58) | 0;
+    }
+  }
+  let out = '';
+  for (const byte of bytes) {
+    if (byte !== 0) break;
+    out += '1';
+  }
+  for (let i = digits.length - 1; i >= 0; i--) out += BASE58_ALPHABET[digits[i]];
+  return out;
+}
+
+/** Encodes version byte + payload with the 4-byte double-SHA256 checksum. */
+async function base58CheckEncode(version, payload) {
+  const data = concatBytes(new Uint8Array([version]), payload);
+  const checksum = (await doubleSha256(data)).slice(0, 4);
+  return base58Encode(concatBytes(data, checksum));
+}
 
 function base58Decode(str) {
   const bytes = [];
@@ -49,4 +81,4 @@ async function base58CheckDecode(str) {
   return { version: payload[0], payload: payload.slice(1) };
 }
 
-export { base58Decode, base58CheckDecode };
+export { base58Encode, base58CheckEncode, base58Decode, base58CheckDecode };

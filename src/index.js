@@ -1,15 +1,23 @@
 /**
- * @neuraiproject/neurai-depin-msg
+ * @neuraiproject/neurai-depin-msg — DePIN Messaging Protocol 2 client.
  *
  * Build, send-prepare, receive, validate, and decrypt DePIN encrypted
  * messages for the Neurai blockchain. Self-contained (noble crypto), runs in
- * browsers, Node, and React Native. Network access is always injected; the
- * library never opens connections itself.
+ * browsers, Node, and React Native. Network access is always injected
+ * (`rpc.call(method, params)`); the library never opens connections itself,
+ * and every DePIN reply is authenticated (`poolsig` against the pinned pool
+ * key) before it is decrypted or interpreted.
+ *
+ * 3.0.0 removes the protocol-1 surface: the TCP gateway transport
+ * (`getRemoteDepinPoolInfo`, `buildDepinMessageForRemotePool`,
+ * `parseDepinPoolInfo`, `DepinTransport`) and the pre-authenticated gateway
+ * sentinel policy (`isPreAuthenticatedSentinel`, `'trust-gateway'`) — the
+ * sentinel is now always rejected with reason `protocol-1-preauthenticated`.
  */
 
 import { hexToBytes, bytesToHex, normalizeHex, concatBytes, timingSafeEqual } from './bytes.js';
 import { sha256, doubleSha256, ripemd160, hash160, kdfSha256 } from './hash.js';
-import { base58Decode, base58CheckDecode } from './base58.js';
+import { base58Encode, base58CheckEncode, base58Decode, base58CheckDecode } from './base58.js';
 import { P2PKH_PREFIX, normalizeNetwork, decodeP2PKHAddress, pubKeyMatchesAddress } from './address.js';
 import {
   isWIF, wifToHex, normalizePrivateKeyTo32Bytes,
@@ -20,7 +28,6 @@ import {
 } from './ecies.js';
 import {
   MAX_DEPIN_RECIPIENTS, MAX_DEPIN_MESSAGE_SIZE, DEPIN_RECEIVE_MAX_LIMIT,
-  isPreAuthenticatedSentinel,
   buildDepinMessage, buildDepinPreimage, assembleDepinMessage,
   parseDepinMessage, verifyDepinReceivedMessage
 } from './message.js';
@@ -34,12 +41,30 @@ import {
   wrapMessageForServer, unwrapMessageFromServer
 } from './receive.js';
 import {
-  resolveDepinRecipients, buildDepinMessageForPool,
-  parseDepinPoolInfo, getRemoteDepinPoolInfo, buildDepinMessageForRemotePool
-} from './resolve.js';
+  DepinError, DepinProtocolError, DepinReplyAuthenticationError,
+  DepinReplyDecryptionError, PoolPinMismatchError, DepinCapabilityError
+} from './errors.js';
+import {
+  NEURAI_MESSAGE_MAGIC,
+  base64Encode, base64Decode, decodeWIF,
+  neuraiSignedMessageHash, signRecoverableMessage,
+  recoverPublicKeyFromMessage, verifyRecoverableMessage
+} from './signmessage.js';
+import {
+  isVerifiedDepinReply, buildDepinReplyPreimage, verifyDepinReply,
+  decodePlainReply, openBoundReply, decodeDepinPoolInfo, poolKeyFingerprint
+} from './depin-reply.js';
+import { createSoftwareIdentity, assertIdentityCapabilities } from './identity.js';
+import {
+  buildDepinRequestPreimage, buildDepinGetPreimage, buildDepinClearPreimage,
+  getDepinPoolInfo, decodeDepinRecipients, resolveDepinRecipients,
+  buildDepinMessageForPool, requestDepinChallenge, decodeChallengeResult,
+  receiveDepinMessages, listDepinSectionsPublic, listDepinSectionsPrivate,
+  clearDepinMessages, submitDepinMessage, decodeSubmitResult
+} from './depin-client.js';
 
 export {
-  // Build / sign
+  // Build / sign messages (CDepinMessage, §5)
   buildDepinMessage,
   buildDepinPreimage,
   assembleDepinMessage,
@@ -50,7 +75,6 @@ export {
   getDepinTokenAncestors,
   parseDepinMessage,
   verifyDepinReceivedMessage,
-  isPreAuthenticatedSentinel,
 
   // Non-custodial reception
   decodeDepinReceiveResponse,
@@ -58,16 +82,57 @@ export {
   validateAndDecryptDepinMessage,
   decryptDepinReceiveEncryptedPayload,
 
-  // Recipient resolution / assisted send (network injected)
+  // Protocol-2 authentication (§3.3, §7)
+  NEURAI_MESSAGE_MAGIC,
+  neuraiSignedMessageHash,
+  signRecoverableMessage,
+  recoverPublicKeyFromMessage,
+  verifyRecoverableMessage,
+  decodeWIF,
+  base64Encode,
+  base64Decode,
+  buildDepinRequestPreimage,
+  buildDepinGetPreimage,
+  buildDepinClearPreimage,
+
+  // Protocol-2 reply envelopes and pinning (§6)
+  isVerifiedDepinReply,
+  buildDepinReplyPreimage,
+  verifyDepinReply,
+  decodePlainReply,
+  openBoundReply,
+  decodeDepinPoolInfo,
+  poolKeyFingerprint,
+
+  // Identities and capabilities
+  createSoftwareIdentity,
+  assertIdentityCapabilities,
+
+  // Protocol-2 client flows (network injected)
+  getDepinPoolInfo,
+  decodeDepinRecipients,
   resolveDepinRecipients,
   buildDepinMessageForPool,
-  parseDepinPoolInfo,
-  getRemoteDepinPoolInfo,
-  buildDepinMessageForRemotePool,
+  requestDepinChallenge,
+  decodeChallengeResult,
+  receiveDepinMessages,
+  listDepinSectionsPublic,
+  listDepinSectionsPrivate,
+  clearDepinMessages,
+  submitDepinMessage,
+  decodeSubmitResult,
 
-  // Transport privacy wrapper
+  // Transport privacy wrapper (depinsubmitmsg envelope)
   wrapMessageForServer,
   unwrapMessageFromServer,
+
+  // Errors
+  DepinError,
+  DepinProtocolError,
+  DepinReplyAuthenticationError,
+  DepinReplyDecryptionError,
+  PoolPinMismatchError,
+  DepinCapabilityError,
 
   // Keys / addresses
   isWIF,
@@ -92,6 +157,8 @@ export {
   ripemd160,
   hash160,
   kdfSha256,
+  base58Encode,
+  base58CheckEncode,
   base58Decode,
   base58CheckDecode,
 
@@ -122,18 +189,50 @@ if (typeof globalThis !== 'undefined') {
     getDepinTokenAncestors,
     parseDepinMessage,
     verifyDepinReceivedMessage,
-    isPreAuthenticatedSentinel,
     decodeDepinReceiveResponse,
     decryptDepinReceivedMessage,
     validateAndDecryptDepinMessage,
     decryptDepinReceiveEncryptedPayload,
+
+    NEURAI_MESSAGE_MAGIC,
+    neuraiSignedMessageHash,
+    signRecoverableMessage,
+    recoverPublicKeyFromMessage,
+    verifyRecoverableMessage,
+    decodeWIF,
+    buildDepinRequestPreimage,
+    buildDepinGetPreimage,
+    buildDepinClearPreimage,
+    isVerifiedDepinReply,
+    buildDepinReplyPreimage,
+    verifyDepinReply,
+    decodePlainReply,
+    openBoundReply,
+    decodeDepinPoolInfo,
+    poolKeyFingerprint,
+    createSoftwareIdentity,
+    assertIdentityCapabilities,
+    getDepinPoolInfo,
+    decodeDepinRecipients,
     resolveDepinRecipients,
     buildDepinMessageForPool,
-    parseDepinPoolInfo,
-    getRemoteDepinPoolInfo,
-    buildDepinMessageForRemotePool,
+    requestDepinChallenge,
+    decodeChallengeResult,
+    receiveDepinMessages,
+    listDepinSectionsPublic,
+    listDepinSectionsPrivate,
+    clearDepinMessages,
+    submitDepinMessage,
+    decodeSubmitResult,
+
     wrapMessageForServer,
     unwrapMessageFromServer,
+    DepinError,
+    DepinProtocolError,
+    DepinReplyAuthenticationError,
+    DepinReplyDecryptionError,
+    PoolPinMismatchError,
+    DepinCapabilityError,
     wifToHex,
     isWIF,
     MAX_DEPIN_RECIPIENTS,
@@ -151,8 +250,12 @@ if (typeof globalThis !== 'undefined') {
       ripemd160,
       hash160,
       kdfSha256,
+      base58Encode,
+      base58CheckEncode,
       base58Decode,
       base58CheckDecode,
+      base64Encode,
+      base64Decode,
       normalizePrivateKeyTo32Bytes,
       parsePublicKey,
       derivePublicKeyForms,

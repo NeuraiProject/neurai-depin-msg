@@ -111,7 +111,7 @@ test('scope, duplicates, and limits are enforced', async () => {
   assert.match(tooBig.reason, /exceeds limit/);
 });
 
-test('sentinel policy: reject by default, decrypt under trust-gateway', async () => {
+test('protocol-1 sentinel is ALWAYS rejected — no trust-gateway escape hatch', async () => {
   const msg = await fixtureMessage();
   const sentinel = { ...msg, signature_hex: '00'.repeat(65) };
   delete sentinel.hash;
@@ -120,21 +120,16 @@ test('sentinel policy: reject by default, decrypt under trust-gateway', async ()
     network: 'test', privateKey: B.privHex
   });
   assert.equal(rejected.ok, false);
-  assert.equal(rejected.authentication, 'gateway-preauthenticated');
+  assert.equal(rejected.authentication, 'invalid');
+  assert.equal(rejected.reason, 'protocol-1-preauthenticated');
   assert.equal(rejected.plaintext, null);
 
-  const trusted = await validateAndDecryptDepinMessage(sentinel, {
+  // The removed policy option is inert: passing it changes nothing.
+  const stillRejected = await validateAndDecryptDepinMessage(sentinel, {
     network: 'test', privateKey: B.privHex, preAuthenticatedPolicy: 'trust-gateway'
   });
-  assert.equal(trusted.ok, true);
-  assert.equal(trusted.signatureValid, false);
-  assert.equal(trusted.authentication, 'gateway-preauthenticated');
-  assert.equal(trusted.plaintext, 'test message');
-
-  await assert.rejects(
-    validateAndDecryptDepinMessage(sentinel, { network: 'test', preAuthenticatedPolicy: 'yolo' }),
-    /preAuthenticatedPolicy/
-  );
+  assert.equal(stillRejected.ok, false);
+  assert.equal(stillRejected.reason, 'protocol-1-preauthenticated');
 });
 
 test('malformed messages are reported, not thrown', async () => {

@@ -2,10 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildDepinMessage, buildDepinPreimage, assembleDepinMessage,
-  parseDepinMessage, verifyDepinReceivedMessage, isPreAuthenticatedSentinel,
+  parseDepinMessage, verifyDepinReceivedMessage,
   hexToBytes, bytesToHex, doubleSha256, concatBytes,
   MAX_DEPIN_RECIPIENTS
 } from '../src/index.js';
+import { isPreAuthenticatedSentinel } from '../src/message.js';
 import { serializeString, serializeVector, serializeInt64 } from '../src/serialize.js';
 import { keypair, addressFor, baseParams, secp256k1 } from './helpers.mjs';
 

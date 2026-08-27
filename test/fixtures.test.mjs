@@ -56,14 +56,14 @@ test('depingetancestorrecipients fixture resolves through resolveDepinRecipients
   const pubkeys = fixture.recipients.map(r => r.pubkey.toLowerCase());
   assert.ok(pubkeys.includes(F.material.r2.pubkey.toLowerCase()), 'r2 (uncompressed) missing');
 
-  const rpc = { call: async () => fixture };
-  const res = await lib.resolveDepinRecipients({
+  // Protocol 2: the RPC reply is a signed envelope; the pure decoder keeps
+  // this fixture's coverage of the body contract.
+  const res = await lib.decodeDepinRecipients(fixture, {
     token: F.tokens.section,
     poolRoot: F.tokens.root,
     maxRecipients: 20,
     senderPubKey: F.material.sender.pubkey,
-    network: 'regtest',
-    rpc
+    network: 'regtest'
   });
   assert.equal(res.senderIncludedInHolders, true);
   assert.equal(res.recipientCount, fixture.recipients.length);
@@ -112,11 +112,11 @@ test('uncompressed recipient decrypts private message via root scope', opts, asy
   assert.equal(priv.message.messageType, 'private');
 });
 
-test('gateway INFO line parses', opts, () => {
-  const info = lib.parseDepinPoolInfo(F.gateway.infoLine);
-  assert.equal(info.token, F.tokens.root);
-  assert.equal(info.maxRecipients, 20);
-  assert.ok(info.maxMessageSize > 0);
+test('protocol-1 gateway surface is gone from the public API', opts, () => {
+  assert.equal(lib.parseDepinPoolInfo, undefined);
+  assert.equal(lib.getRemoteDepinPoolInfo, undefined);
+  assert.equal(lib.buildDepinMessageForRemotePool, undefined);
+  assert.equal(lib.isPreAuthenticatedSentinel, undefined);
 });
 
 test('2.2.1 compat against Core payloads', opts, async () => {

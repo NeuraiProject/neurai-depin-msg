@@ -1,6 +1,6 @@
 {
   "name": "@neuraiproject/neurai-depin-msg",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Build, receive, validate and decrypt DePIN encrypted messages for Neurai blockchain",
   "type": "module",
   "main": "dist/neurai-depin-msg.cjs",

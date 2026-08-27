@@ -2106,7 +2106,14 @@ async function buildDepinMessageForPool(params) {
       senderPubKey,
       recipientPubKeys: resolution.recipientPubKeys
     });
-    const signature = await identity.signDigest(preimage.messageDigest.slice());
+    const signature = await identity.signDigest(preimage.messageDigest.slice(), {
+      kind: "message",
+      token,
+      senderAddress,
+      timestamp: buildParams.timestamp,
+      messageType: preimage.messageTypeByte,
+      encryptedPayloadHex: preimage.encryptedPayloadHex
+    });
     const built2 = await assembleDepinMessage({
       token,
       senderAddress,
@@ -2163,7 +2170,13 @@ async function requestDepinChallenge({ rpc, identity, token, poolPublicKey, type
     address: identity.address,
     timestampMs: t
   });
-  const signature = await identity.signMessage(preimage);
+  const signature = await identity.signMessage(preimage, {
+    kind: "request",
+    type,
+    token,
+    address: identity.address,
+    timestampMs: t
+  });
   const reply = await rpc.call("depinchallenge", [token, identity.address, t, signature, type]);
   const verified = verifyDepinReply({
     reply,
@@ -2209,7 +2222,12 @@ async function receiveDepinMessages(params) {
     throw new DepinProtocolError("timestamp must be a non-negative integer (Unix seconds)");
   }
   const preimage = buildDepinGetPreimage({ token, address: identity.address, challenge });
-  const signature = await identity.signMessage(preimage);
+  const signature = await identity.signMessage(preimage, {
+    kind: "get",
+    token,
+    address: identity.address,
+    challenge
+  });
   const rpcParams = [token, identity.address, challenge, signature];
   const tail = [timestamp, afterHash, limit];
   let lastProvided = -1;
@@ -2274,7 +2292,12 @@ async function listDepinSectionsPrivate({ rpc, identity, scope, challenge, poolP
   assertToken(scope, "scope");
   assertChallenge(challenge);
   const preimage = buildDepinGetPreimage({ token: scope, address: identity.address, challenge });
-  const signature = await identity.signMessage(preimage);
+  const signature = await identity.signMessage(preimage, {
+    kind: "get",
+    token: scope,
+    address: identity.address,
+    challenge
+  });
   const reply = await rpc.call("depinlistsections", [identity.address, scope, challenge, signature]);
   const verified = verifyDepinReply({
     reply,
@@ -2313,7 +2336,12 @@ async function clearDepinMessages({ rpc, identity, scope = "", poolRoot, challen
     address: identity.address,
     challenge
   });
-  const signature = await identity.signMessage(preimage);
+  const signature = await identity.signMessage(preimage, {
+    kind: "clear",
+    scope: effectiveScope,
+    address: identity.address,
+    challenge
+  });
   const rpcParams = [scope, identity.address, challenge, signature];
   if (mode !== void 0) rpcParams.push(mode);
   const reply = await rpc.call("depinclearmsg", rpcParams);

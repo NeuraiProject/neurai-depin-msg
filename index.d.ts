@@ -523,9 +523,59 @@ export function poolKeyFingerprint(pubKey: string | Uint8Array): string;
 // Protocol 2 — identities and capabilities
 // ---------------------------------------------------------------------------
 
-export type SignMessage = (preimage: string) => Promise<string> | string;
+/**
+ * Structured description of an authentication preimage (3.1.0). Passed to
+ * `signMessage` alongside the preimage so a hardware signer can REBUILD and
+ * validate what it is about to sign instead of trusting an opaque string:
+ * feeding it back to buildDepinRequest/Get/ClearPreimage reproduces the
+ * preimage exactly. It never replaces the preimage — the signature must cover
+ * the string the flow built.
+ */
+export type DepinAuthSigningContext =
+  | {
+      kind: 'request';
+      type: 'receive' | 'admin';
+      token: string;
+      address: string;
+      timestampMs: number;
+    }
+  | {
+      kind: 'get';
+      token: string;
+      address: string;
+      challenge: string;
+    }
+  | {
+      kind: 'clear';
+      /** RESOLVED scope: the pool root when the caller passed ''. */
+      scope: string;
+      address: string;
+      challenge: string;
+    };
+
+/**
+ * Fields the CDepinMessage digest was built from (3.1.0), so an external
+ * signer can recompute it: SHA256d(ser_string(token) ‖ ser_string(sender) ‖
+ * LE64(timestamp) ‖ messageType ‖ ser_vector(encryptedPayload)).
+ */
+export interface DepinMessageSigningContext {
+  kind: 'message';
+  token: string;
+  senderAddress: string;
+  timestamp: number;
+  /** 0x01 private, 0x02 group. */
+  messageType: number;
+  encryptedPayloadHex: string;
+}
+
+/** The context parameter is additive: one-argument signers keep working. */
+export type SignMessage = (
+  preimage: string,
+  context?: DepinAuthSigningContext
+) => Promise<string> | string;
 export type SignDigest = (
-  digest: Uint8Array
+  digest: Uint8Array,
+  context?: DepinMessageSigningContext
 ) => Promise<Uint8Array | string> | Uint8Array | string;
 
 export interface HolderIdentity {

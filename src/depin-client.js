@@ -323,8 +323,16 @@ async function buildDepinMessageForPool(params) {
       recipientPubKeys: resolution.recipientPubKeys
     });
     // Give the device its own copy: a callback cannot mutate the value kept
-    // in the preimage result or affect assembly.
-    const signature = await identity.signDigest(preimage.messageDigest.slice());
+    // in the preimage result or affect assembly. The context carries the
+    // fields the digest was built from, so a hardware signer can rebuild it.
+    const signature = await identity.signDigest(preimage.messageDigest.slice(), {
+      kind: 'message',
+      token,
+      senderAddress,
+      timestamp: buildParams.timestamp,
+      messageType: preimage.messageTypeByte,
+      encryptedPayloadHex: preimage.encryptedPayloadHex
+    });
     const built = await assembleDepinMessage({
       token,
       senderAddress,
@@ -399,7 +407,11 @@ async function requestDepinChallenge({ rpc, identity, token, poolPublicKey, type
   const preimage = buildDepinRequestPreimage({
     type, token, address: identity.address, timestampMs: t
   });
-  const signature = await identity.signMessage(preimage);
+  // The structured context lets a hardware signer rebuild and validate the
+  // preimage itself instead of signing an opaque string (3.1.0, additive).
+  const signature = await identity.signMessage(preimage, {
+    kind: 'request', type, token, address: identity.address, timestampMs: t
+  });
 
   const reply = await rpc.call('depinchallenge', [token, identity.address, t, signature, type]);
   const verified = verifyDepinReply({
@@ -451,7 +463,9 @@ async function receiveDepinMessages(params) {
   }
 
   const preimage = buildDepinGetPreimage({ token, address: identity.address, challenge });
-  const signature = await identity.signMessage(preimage);
+  const signature = await identity.signMessage(preimage, {
+    kind: 'get', token, address: identity.address, challenge
+  });
 
   // Positional optionals: null fills a skipped slot when a later one is set.
   const rpcParams = [token, identity.address, challenge, signature];
@@ -531,7 +545,9 @@ async function listDepinSectionsPrivate({ rpc, identity, scope, challenge, poolP
   assertChallenge(challenge);
 
   const preimage = buildDepinGetPreimage({ token: scope, address: identity.address, challenge });
-  const signature = await identity.signMessage(preimage);
+  const signature = await identity.signMessage(preimage, {
+    kind: 'get', token: scope, address: identity.address, challenge
+  });
 
   const reply = await rpc.call('depinlistsections', [identity.address, scope, challenge, signature]);
   const verified = verifyDepinReply({
@@ -582,7 +598,11 @@ async function clearDepinMessages({ rpc, identity, scope = '', poolRoot, challen
   const preimage = buildDepinClearPreimage({
     scope: effectiveScope, address: identity.address, challenge
   });
-  const signature = await identity.signMessage(preimage);
+  // `scope` carries the RESOLVED scope (pool root when '' was passed), the
+  // same value the signature and the reply verification are bound to.
+  const signature = await identity.signMessage(preimage, {
+    kind: 'clear', scope: effectiveScope, address: identity.address, challenge
+  });
 
   const rpcParams = [scope, identity.address, challenge, signature];
   if (mode !== undefined) rpcParams.push(mode);

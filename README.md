@@ -179,6 +179,49 @@ compact 64-byte) signature. `buildDepinMessageForPool({ identity, ... })`
 performs that sequence, invokes `signDigest` once and verifies the returned
 signature locally. The private key never touches the library.
 
+#### Signing contexts (3.1.0)
+
+A hardware wallet should not sign an opaque string: it needs to know *what*
+it is authorising. Since 3.1.0 every flow passes a **structured context** as
+an optional second argument, so the device can rebuild the preimage itself
+and check it against the session it was approved for:
+
+```js
+const identity = {
+  address,
+  publicKey,
+  // preimage is what gets signed; context describes it field by field
+  signMessage: async (preimage, context) => {
+    // context: { kind: 'request', type, token, address, timestampMs }
+    //        | { kind: 'get',     token, address, challenge }
+    //        | { kind: 'clear',   scope, address, challenge }
+    return device.signAuth(context);          // device rebuilds + signs
+  },
+  signDigest: async (digest, context) => {
+    // context: { kind: 'message', token, senderAddress, timestamp,
+    //            messageType, encryptedPayloadHex }
+    return device.signMessageStructured(context);
+  },
+  openReply: (encryptedHex) => device.decrypt(encryptedHex),
+};
+```
+
+Rebuilding a context with `buildDepinRequestPreimage`,
+`buildDepinGetPreimage` or `buildDepinClearPreimage` reproduces the preimage
+**exactly**; the `message` context reproduces the digest. Notes:
+
+- **Additive.** One-argument signers keep working unchanged — including
+  `createSoftwareIdentity`, which ignores the context.
+- **The context never replaces the preimage.** It is advisory input for the
+  signer; the signature must cover the string/digest the flow built, and the
+  library verifies publishing signatures locally either way.
+- `clear` carries the **resolved** scope: when you call `clearDepinMessages`
+  with `scope: ''`, the context (like the signature) names the pool root, not
+  the empty string.
+
+`@neuraiproject/neurai-sign-esp32` ships `createDepinDeviceIdentity`, which
+implements this contract against a NeuraiHW device.
+
 ## Utilities
 
 `validateDepinSectionToken`, `isDepinTokenInScope`, `getDepinTokenAncestors`,
@@ -216,6 +259,10 @@ surface (breaking):
   the pure `decodeDepinRecipients` decodes an already-verified body.
 - `decodeDepinReceiveResponse` now also returns `nextChallenge` /
   `nextExpiresIn` for challenge chaining.
+
+**3.1.0** is additive on top of that: external signers receive a structured
+[signing context](#signing-contexts-310) as an optional second argument. No
+existing signer needs changes.
 
 The message wire format (§5) and the ECIES envelope (§4) are unchanged: a
 message built with 2.x `buildDepinMessage` is still valid.

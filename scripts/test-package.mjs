@@ -38,7 +38,10 @@ try {
     'pack', '--ignore-scripts', '--pack-destination', tarballDirectory, '--json'
   ]);
   const packResult = JSON.parse(packOutput);
-  const tarball = join(tarballDirectory, packResult[0].filename);
+  // npm versions emit either an array or a package-name keyed object.
+  const packed = Array.isArray(packResult) ? packResult[0] : Object.values(packResult)[0];
+  if (!packed?.filename) throw new Error('npm pack returned no tarball filename');
+  const tarball = join(tarballDirectory, packed.filename);
 
   writeFileSync(
     join(consumerDirectory, 'package.json'),

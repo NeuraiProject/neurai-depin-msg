@@ -15,6 +15,7 @@ export type Authentication = 'signature' | 'invalid';
 
 export interface BuildDepinMessageParams {
   token: string;
+  /** Legacy P2PKH address (N…/t…); witness addresses are rejected. */
   senderAddress: string;
   /** 33-byte compressed or 65-byte uncompressed public key, hex. */
   senderPubKey: string;
@@ -300,6 +301,12 @@ export function privateKeyMatchesPublicKey(
   privKeyBytes: Uint8Array,
   pubKey: string | Uint8Array
 ): boolean;
+/**
+ * Decodes a Legacy Base58 P2PKH address (the only address type DePIN
+ * supports). Bech32m witness addresses — nc1…/tnc1… (AuthScript v1),
+ * pq1…/tpq1… (PQ v2), nq1…/tnq1… (ECDSA v3) — are rejected with an explicit
+ * "DePIN requires a Legacy P2PKH address" error.
+ */
 export function decodeP2PKHAddress(
   address: string,
   network?: Network | null
@@ -579,6 +586,12 @@ export type SignDigest = (
 ) => Promise<Uint8Array | string> | Uint8Array | string;
 
 export interface HolderIdentity {
+  /**
+   * Legacy P2PKH address (N…/t…). DePIN on the node only works with P2PKH:
+   * with neurai-key 5 derive it with 'xna-legacy' / 'xna-legacy-test' (not
+   * 'xna', which is ECDSA witness v3). Witness addresses (nc1…, pq1…, nq1…)
+   * are rejected.
+   */
   address: string;
   signMessage: SignMessage;
   openReply: OpenReply;
@@ -593,6 +606,7 @@ export interface SenderIdentity extends HolderIdentity {
 export function createSoftwareIdentity(params: {
   privateKey: string;
   network: Network;
+  /** Optional Legacy P2PKH address to bind; derived from the key when omitted. */
   address?: string;
 }): Promise<SenderIdentity & { network: 'mainnet' | 'test' }>;
 
@@ -707,3 +721,8 @@ export function submitDepinMessage(params: {
 export function decodeSubmitResult(
   opened: unknown
 ): Record<string, unknown> & { result: 'success'; hash: string };
+
+// Only the declarations marked `export` are public. Without this, a
+// declaration file exports every top-level declaration, and the brand symbol
+// VERIFIED_REPLY (not exported at runtime) was typed as an importable value.
+export {};

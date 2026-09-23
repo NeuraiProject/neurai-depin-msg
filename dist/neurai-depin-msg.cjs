@@ -252,6 +252,47 @@ var P2PKH_PREFIX = {
   mainnet: 53,
   test: 127
 };
+var WITNESS_ADDRESS_ERROR = "DePIN requires a Legacy P2PKH address (neurai-key network 'xna-legacy' / 'xna-legacy-test'); witness addresses (nc1\u2026, pq1\u2026, nq1\u2026) are not accepted by the node";
+var BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+var BECH32_CONST = 1;
+var BECH32M_CONST = 734539939;
+var WITNESS_HRPS = ["nc", "tnc", "pq", "tpq", "nq", "tnq"];
+function bech32Polymod(values) {
+  const GEN = [996825010, 642813549, 513874426, 1027748829, 705979059];
+  let chk = 1;
+  for (const v of values) {
+    const top = chk >>> 25;
+    chk = (chk & 33554431) << 5 ^ v;
+    for (let i = 0; i < 5; i++) {
+      if (top >>> i & 1) chk ^= GEN[i];
+    }
+  }
+  return chk >>> 0;
+}
+function inspectWitnessAddress(address) {
+  if (address !== address.toLowerCase() && address !== address.toUpperCase()) return null;
+  const str = address.toLowerCase();
+  const sep = str.lastIndexOf("1");
+  if (sep < 1 || str.length - sep - 1 < 7) return null;
+  const hrp = str.slice(0, sep);
+  if (!WITNESS_HRPS.includes(hrp)) return null;
+  const data = [];
+  for (const ch of str.slice(sep + 1)) {
+    const v = BECH32_CHARSET.indexOf(ch);
+    if (v === -1) return null;
+    data.push(v);
+  }
+  const expanded = [];
+  for (let i = 0; i < hrp.length; i++) expanded.push(hrp.charCodeAt(i) >> 5);
+  expanded.push(0);
+  for (let i = 0; i < hrp.length; i++) expanded.push(hrp.charCodeAt(i) & 31);
+  const check = bech32Polymod(expanded.concat(data));
+  return {
+    hrp,
+    witnessVersion: data[0],
+    checksumValid: check === BECH32_CONST || check === BECH32M_CONST
+  };
+}
 function normalizeNetwork(network) {
   if (network === "mainnet") return "mainnet";
   if (network === "test" || network === "testnet" || network === "regtest") return "test";
@@ -263,7 +304,22 @@ async function decodeP2PKHAddress(address, network) {
   if (typeof address !== "string" || address.length === 0) {
     throw new Error("Address is required");
   }
-  const { version, payload } = await base58CheckDecode(address);
+  let decoded;
+  try {
+    decoded = await base58CheckDecode(address);
+  } catch (err) {
+    const witness = inspectWitnessAddress(address);
+    if (witness === null) throw err;
+    if (!witness.checksumValid) {
+      throw new Error(
+        "Address looks like a Bech32m witness address but its checksum is invalid; " + WITNESS_ADDRESS_ERROR
+      );
+    }
+    throw new Error(
+      "Unsupported witness v" + witness.witnessVersion + " address ('" + witness.hrp + "1\u2026'): " + WITNESS_ADDRESS_ERROR
+    );
+  }
+  const { version, payload } = decoded;
   if (payload.length !== 20) {
     throw new Error("Address payload must be 20 bytes (P2PKH)");
   }

@@ -12,6 +12,10 @@
  * → publish via the library → holder reads it back → admin clear → adversarial
  * poolsig (a MITM proxy that flips a byte) is rejected without decoding.
  *
+ * Wallet addresses are requested as `getnewaddress "" legacy` (DePIN is
+ * Legacy P2PKH only), so IMAGE must ship a node whose getnewaddress accepts
+ * the address_type argument (neurai-key 5 address types).
+ *
  * Run: node tmp/e2e-regtest-3.0.0.mjs
  */
 import { execFileSync } from 'node:child_process';
@@ -42,6 +46,10 @@ const cli = (...a) => sh('docker', [
   `-rpcuser=${RPC_USER}`, `-rpcpassword=${RPC_PASS}`, `-rpcport=${RPC_PORT}`, ...a.map(String)
 ]);
 const cliJson = (...a) => JSON.parse(cli(...a));
+// DePIN only works with Legacy P2PKH addresses: request the type explicitly
+// (getnewaddress ( "account" "address_type" )) so a wallet whose default
+// family is not legacy fails loudly instead of handing out a witness address.
+const newLegacyAddress = () => cli('getnewaddress', '', 'legacy');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let failures = 0;
@@ -103,12 +111,12 @@ async function main() {
   if (!await waitRpc()) throw new Error('neuraid RPC did not come up');
 
   // --- pool bootstrap (adapted from contrib/depin/regtest_walkthrough.sh) ---
-  const ROOT = cli('getnewaddress');
+  const ROOT = newLegacyAddress();
   cli('generatetoaddress', 150, ROOT);
   cli('issue', '&TEST', 1000, ROOT);
   cli('generatetoaddress', 1, ROOT);
-  const HOLDER = cli('getnewaddress');
-  const STRANGER = cli('getnewaddress');
+  const HOLDER = newLegacyAddress();
+  const STRANGER = newLegacyAddress();
   for (const a of [HOLDER, STRANGER]) cli('sendtoaddress', a, 2);
   cli('generatetoaddress', 1, ROOT);
   for (const a of [HOLDER, STRANGER]) cli('sendfromaddress', a, ROOT, 1); // reveal keys

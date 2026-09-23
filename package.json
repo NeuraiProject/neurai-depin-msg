@@ -1,6 +1,6 @@
 {
   "name": "@neuraiproject/neurai-depin-msg",
-  "version": "3.1.1",
+  "version": "3.1.2",
   "description": "Build, receive, validate and decrypt DePIN encrypted messages for Neurai blockchain",
   "type": "module",
   "main": "dist/neurai-depin-msg.cjs",
@@ -9,9 +9,14 @@
   "types": "index.d.ts",
   "exports": {
     ".": {
-      "types": "./index.d.ts",
-      "import": "./dist/neurai-depin-msg.mjs",
-      "require": "./dist/neurai-depin-msg.cjs",
+      "import": {
+        "types": "./index.d.ts",
+        "default": "./dist/neurai-depin-msg.mjs"
+      },
+      "require": {
+        "types": "./dist/neurai-depin-msg.d.cts",
+        "default": "./dist/neurai-depin-msg.cjs"
+      },
       "default": "./dist/neurai-depin-msg.mjs"
     },
     "./dist/*": "./dist/*",
@@ -23,16 +28,21 @@
     "index.d.ts"
   ],
   "scripts": {
-    "build": "npm run build:iife && npm run build:iife:dev && npm run build:esm && npm run build:cjs",
+    "build": "npm run build:iife && npm run build:iife:dev && npm run build:esm && npm run build:cjs && npm run build:types",
     "build:iife": "esbuild src/index.js --bundle --minify --format=iife --global-name=neuraiDepinMsg --outfile=dist/neurai-depin-msg.min.js",
     "build:iife:dev": "esbuild src/index.js --bundle --format=iife --global-name=neuraiDepinMsg --outfile=dist/neurai-depin-msg.js",
     "build:esm": "esbuild src/index.js --bundle --format=esm --packages=external --outfile=dist/neurai-depin-msg.mjs",
     "build:cjs": "esbuild src/index.js --bundle --format=cjs --packages=external --outfile=dist/neurai-depin-msg.cjs",
-    "test": "node --test 'test/*.test.mjs' && npm run test:package",
+    "build:types": "node scripts/write-cjs-declarations.mjs",
+    "test": "node --test 'test/*.test.mjs' && npm run test:types && npm run test:package",
     "gen-fixtures": "node scripts/generate-fixtures.mjs",
     "pretest": "npm run build",
-    "test:package": "node scripts/test-package.mjs",
+    "test:types": "tsc -p tsconfig.types-nodenext.json && tsc -p tsconfig.types-node16.json && tsc -p tsconfig.types-bundler.json",
+    "test:package": "node scripts/test-package.mjs && node scripts/check-package.mjs",
     "prepack": "npm run build"
+  },
+  "config": {
+    "minTypeScript": "4.8.4"
   },
   "repository": {
     "type": "git",

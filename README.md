@@ -48,6 +48,31 @@ included so it can read its own messages.
 The node needs `-assetindex` and `-pubkeyindex` for recipient resolution,
 and only addresses with an on-chain **revealed public key** can receive.
 
+## Addresses: Legacy P2PKH only
+
+The node's DePIN service (messaging, challenges, pool keys and recipient
+resolution) only works with **Legacy Base58 P2PKH** addresses: `N…` on
+mainnet, `t…` on testnet/regtest. Every identity, sender and recipient
+address used with this library must be one.
+
+- With `@neuraiproject/neurai-key` 5, derive DePIN keys with the network
+  **`xna-legacy`** (mainnet) or **`xna-legacy-test`** (testnet/regtest).
+  Do **not** use `xna` / `xna-test`: since neurai-key 5 they produce ECDSA
+  witness v3 addresses (`nq1r…`), which DePIN does not accept.
+- Witness addresses — generic AuthScript v1 (`nc1p…`/`tnc1p…`),
+  post-quantum v2 (`pq1z…`/`tpq1z…`) and ECDSA v3 (`nq1r…`/`tnq1r…`) — are
+  rejected with an explicit error (`DePIN requires a Legacy P2PKH address
+  …`) wherever an address is decoded. Base58 addresses that merely start
+  like a Bech32 prefix (`NQ1…`, `tNc1…`) are ordinary P2PKH and keep working.
+- **Tokens held on a witness address get no DePIN messages**: the node only
+  resolves P2PKH holders as recipients, and challenges for a witness address
+  are refused. Keep the DePIN token on a Legacy address to read or send.
+- The hardware-wallet DePIN identity path `m/44'/1900'/100'/0/0` (P2PKH) is
+  unchanged.
+- With a node wallet, request addresses explicitly as
+  `getnewaddress "" legacy`: a wallet whose default family is not legacy
+  would otherwise hand out a witness address.
+
 ## Receiving (non-custodial)
 
 ```js
@@ -264,13 +289,27 @@ surface (breaking):
 [signing context](#signing-contexts-310) as an optional second argument. No
 existing signer needs changes.
 
+**3.1.2** only clarifies address types for neurai-key 5 (see
+[Addresses: Legacy P2PKH only](#addresses-legacy-p2pkh-only)): witness
+addresses (`nc1…`, `pq1…`, `nq1…`) now fail with an explicit "DePIN
+requires a Legacy P2PKH address" error instead of a Base58 decoding error.
+It also fixes the TypeScript declarations: `require` now gets CommonJS
+declarations (`dist/neurai-depin-msg.d.cts`), so CommonJS projects compiled
+with `moduleResolution` `node16` (or `nodenext` before TypeScript 5.8) no
+longer fail with TS1471 / TS1479, and
+the internal `VERIFIED_REPLY` brand is no longer declared as an importable
+value (it never existed at runtime). Declarations need TypeScript 4.8 or
+later. Nothing that worked before changes behaviour.
+
 The message wire format (§5) and the ECIES envelope (§4) are unchanged: a
 message built with 2.x `buildDepinMessage` is still valid.
 
 ## Testing
 
 ```
-npm test                 # builds, runs the suite + the package gate
+npm test                 # builds, runs the suite, the type tests and the package gates
+npm run test:types       # compiles types-test/ (ESM and CommonJS) in NodeNext, Node16 and Bundler
+npm run test:package     # packs the tarball and checks it in a clean project (runtime, IIFE, types, TypeScript 4.8)
 ```
 
 The suite verifies the official protocol-2 vectors (spec §13,

@@ -1,0 +1,11 @@
+{
+  // node16 decides the module format of each declaration file strictly:
+  // `import` must get ESM declarations (index.d.ts) and `require` CommonJS
+  // ones (dist/neurai-depin-msg.d.cts). Before 3.1.2 `require` got index.d.ts
+  // and consumer.cts failed with TS1471.
+  "extends": "./tsconfig.types-nodenext.json",
+  "compilerOptions": {
+    "module": "Node16",
+    "moduleResolution": "Node16"
+  }
+}

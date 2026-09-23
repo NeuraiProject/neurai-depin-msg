@@ -1,0 +1,18 @@
+{
+  // Type-checks the published declarations the way applications consume
+  // them: ESM (index.d.ts, ESM because the package is "type": "module") and
+  // CommonJS (dist/neurai-depin-msg.d.cts), with skipLibCheck: false (tsc's
+  // default) so errors inside the declarations are reported. NodeNext here;
+  // see the -node16 and -bundler variants.
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "types": []
+  },
+  "files": ["types-test/consumer.mts", "types-test/consumer.cts"]
+}

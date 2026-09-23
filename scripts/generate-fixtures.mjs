@@ -49,6 +49,16 @@ function cli(...args) {
   try { return JSON.parse(out); } catch { return out; }
 }
 
+// DePIN only works with Legacy P2PKH addresses, so every wallet address is
+// requested with an explicit address type. Without it a wallet whose default
+// family is not legacy (a -pqwallet=1 wallet defaults to generic AuthScript
+// v1) would silently hand out witness addresses; with it the node fails
+// loudly instead. Needs a node whose getnewaddress accepts
+// ( "account" "address_type" ).
+function newLegacyAddress() {
+  return cli('getnewaddress', '', 'legacy');
+}
+
 function cliRaw(...args) {
   try {
     return { ok: true, result: cli(...args) };
@@ -125,7 +135,7 @@ async function main() {
   try {
     // 2. Mine until the asset softfork is active (BIP9: 144-block windows,
     // threshold 108) and coinbase maturity is covered.
-    const minerAddr = cli('getnewaddress');
+    const minerAddr = newLegacyAddress();
     for (let i = 0; ; i++) {
       mineBlocks(20, minerAddr);
       const info = cli('getblockchaininfo');
@@ -139,8 +149,8 @@ async function main() {
 
     // 3. Key material. r2 uses an uncompressed key imported from a fixed
     // regtest WIF so the fixture exercises 65-byte pubkeys end to end.
-    const sender = cli('getnewaddress');
-    const r1 = cli('getnewaddress');
+    const sender = newLegacyAddress();
+    const r1 = newLegacyAddress();
 
     const r2PrivHex = '5a'.repeat(32);
     const r2Wif = await base58CheckEncode([239], lib.hexToBytes(r2PrivHex)); // no 0x01: uncompressed
@@ -203,13 +213,13 @@ async function main() {
 
       const total = recipients.length; // 1 unit each
       const outputs = [
-        { [cli('getnewaddress')]: Number((feeUtxo.amount - 0.01).toFixed(8)) },
-        { [cli('getnewaddress')]: { transfer: { [asset + '!']: 1 } } },
+        { [newLegacyAddress()]: Number((feeUtxo.amount - 0.01).toFixed(8)) },
+        { [newLegacyAddress()]: { transfer: { [asset + '!']: 1 } } },
         ...recipients.map(to => ({ [to]: { transfer: { [asset]: 1 } } }))
       ];
       const change = assetOp.amount - total;
       if (change > 0) {
-        outputs.push({ [cli('getnewaddress')]: { transfer: { [asset]: change } } });
+        outputs.push({ [newLegacyAddress()]: { transfer: { [asset]: change } } });
       }
 
       const raw = cli('createrawtransaction',

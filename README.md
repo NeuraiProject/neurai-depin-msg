@@ -29,6 +29,25 @@ npm install @neuraiproject/neurai-depin-msg
 | Browser `<script>` (global `neuraiDepinMsg`) | `dist/neurai-depin-msg.min.js` |
 | TypeScript types | `index.d.ts` |
 
+## Reset testnet
+
+The application supplies the RPC transport, so verify `getblockhash(0)`
+against the reset testnet genesis
+`0000008b384aeffecdab182575dc4e86c9f07f90318c65088532660ed9a8a021`
+before reading or publishing. Rebuild message cursors and cached holdings
+from the new chain. The pool signing key comes from the node wallet: keep
+the dedicated wallet if clients must retain their existing pinned pool key.
+If the key rotates, update the pin only after authenticating the new key
+through the migration process; an old pin correctly raises
+`PoolPinMismatchError`.
+
+At node commit `0fe5a74`, `depinreceivemsg` can sign `has_more=false` even
+when a second page exists. High-level `receiveDepinMessages` treats a full
+limited page as possibly having more and preserves the signed value in `raw`.
+Continue with `afterHash` until a short or empty page; the last full page may
+require one extra request. The lower-level `decodeDepinReceiveResponse` returns
+the signed `has_more` unchanged because it does not know the requested limit.
+
 ## The DePIN model in one minute
 
 A message pool is rooted at a DePIN token such as `&NEWS`. Sub-assets are
@@ -156,17 +175,22 @@ const { sections } = await listDepinSectionsPublic({ rpc, poolRoot: pin.poolRoot
 // 3. Read loop for (token, address): challenge → receive → chain.
 const identity = await createSoftwareIdentity({ privateKey: holderWif, network: 'mainnet' });
 const ch = await requestDepinChallenge({ rpc, identity, token: '&NEWS/GENERAL', poolPublicKey });
-let page = await receiveDepinMessages({
-  rpc, identity, token: '&NEWS/GENERAL', challenge: ch.challenge,
-  poolPublicKey, network: 'mainnet', limit: 25,
-  resolveSenderPubKey: async (addr) => myPubkeyCache(addr), // getpubkey, cacheable
-});
-for (const m of page.messages) if (m.ok) console.log(m.message.sender, m.plaintext);
-// Keep reading within 300 s without another depinchallenge:
-if (page.hasMore) page = await receiveDepinMessages({
-  rpc, identity, token: '&NEWS/GENERAL', challenge: page.nextChallenge,
-  poolPublicKey, network: 'mainnet', afterHash: page.messages.at(-1)?.hash ?? '',
-});
+let challenge = ch.challenge;
+let afterHash;
+while (true) {
+  const page = await receiveDepinMessages({
+    rpc, identity, token: '&NEWS/GENERAL', challenge, afterHash,
+    poolPublicKey, network: 'mainnet', limit: 25,
+    resolveSenderPubKey: async (addr) => myPubkeyCache(addr), // getpubkey, cacheable
+  });
+  for (const m of page.messages) if (m.ok) console.log(m.message.sender, m.plaintext);
+  if (!page.hasMore) break;
+  afterHash = page.messages.at(-1)?.hash;
+  if (!afterHash) throw new Error('Full DePIN page has no cursor');
+  challenge = page.nextChallenge ?? (await requestDepinChallenge({
+    rpc, identity, token: '&NEWS/GENERAL', poolPublicKey
+  })).challenge;
+}
 
 // 4. Publish: resolve recipients (a SIGNED envelope), build, submit.
 const built = await buildDepinMessageForPool({
@@ -300,6 +324,10 @@ longer fail with TS1471 / TS1479, and
 the internal `VERIFIED_REPLY` brand is no longer declared as an importable
 value (it never existed at runtime). Declarations need TypeScript 4.8 or
 later. Nothing that worked before changes behaviour.
+
+**3.1.3** works around a Core pagination bug: a full limited page keeps
+`hasMore=true` even when the node signs `has_more=false`. The signed value
+remains available in `raw`. It also fixes `npm test` on Node 20.
 
 The message wire format (§5) and the ECIES envelope (§4) are unchanged: a
 message built with 2.x `buildDepinMessage` is still valid.

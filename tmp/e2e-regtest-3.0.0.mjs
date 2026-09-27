@@ -1,20 +1,20 @@
 /**
  * E2E regtest for neurai-depin-msg 3.0.0 (plan v2 §6.3).
  *
- * Throwaway container from neurai-regtest-depin:347362b. A single regtest
- * node runs the DePIN pool (-depinmsg=1 -depinmsgtoken=&TEST); the LIBRARY is
- * the client, driven from the host with a minimal fetch-based rpc.call. The
+ * A throwaway container, or NEURAI_REGTEST_CONTAINER for an existing isolated
+ * node, runs the DePIN pool (-depinmsg=1 -depinmsgtoken=&TEST). The library is
+ * the client, driven with a minimal fetch-based rpc.call. The
  * node holds no client keys for us — we dump the holder/owner WIFs with
  * dumpprivkey and let the library sign locally (non-custodial, exactly as an
- * app would). Container removed even on failure.
+ * app would). A supplied container is kept; the throwaway one is removed.
  *
  * Flow: bootstrap TOFU pin → public sections → challenge → receive (chaining)
  * → publish via the library → holder reads it back → admin clear → adversarial
  * poolsig (a MITM proxy that flips a byte) is rejected without decoding.
  *
  * Wallet addresses are requested as `getnewaddress "" legacy` (DePIN is
- * Legacy P2PKH only), so IMAGE must ship a node whose getnewaddress accepts
- * the address_type argument (neurai-key 5 address types).
+ * Legacy P2PKH only), so the node must support getnewaddress with
+ * the address_type argument.
  *
  * Run: node tmp/e2e-regtest-3.0.0.mjs
  */
@@ -28,13 +28,14 @@ import {
 } from '../src/index.js';
 
 const IMAGE = 'neurai-regtest-depin:347362b';
-const CONTAINER = `neurai-depin-e2e-${process.pid}`;
+const EXTERNAL_CONTAINER = Boolean(process.env.NEURAI_REGTEST_CONTAINER);
+const CONTAINER = process.env.NEURAI_REGTEST_CONTAINER || `neurai-depin-e2e-${process.pid}`;
 const RPC_PORT = 23500 + (process.pid % 1000);
 const RPC_USER = 't';
 const RPC_PASS = 't';
-const NEURAID = '/root/Neurai/src/neuraid';
-const CLI = '/root/Neurai/src/neurai-cli';
-const DATADIR = '/root/e2e';
+const NEURAID = process.env.NEURAI_REGTEST_CONTAINER_NEURAID || '/root/Neurai/src/neuraid';
+const CLI = process.env.NEURAI_REGTEST_CONTAINER_CLI || '/root/Neurai/src/neurai-cli';
+const DATADIR = `/tmp/neurai-depin-e2e-${process.pid}`;
 const SERVICE = 'regtest://depin-e2e';
 
 function sh(cmd, args) {
@@ -84,11 +85,13 @@ function makeRpc() {
 }
 
 async function main() {
-  console.log(`Starting ${CONTAINER} (rpc 127.0.0.1:${RPC_PORT}, loopback only)`);
-  // PID 1 is a sleep so the container survives daemon restarts; the node runs
-  // as a backgrounded exec we can stop and relaunch with different flags.
-  docker('run', '-d', '--name', CONTAINER, '-p', `127.0.0.1:${RPC_PORT}:${RPC_PORT}`, IMAGE,
-    'tail', '-f', '/dev/null');
+  console.log(`Starting DePIN test in ${CONTAINER} (rpc 127.0.0.1:${RPC_PORT})`);
+  // The caller can supply an isolated container and share its network namespace.
+  // Otherwise, keep the historical throwaway-container behavior.
+  if (!EXTERNAL_CONTAINER) {
+    docker('run', '-d', '--name', CONTAINER, '-p', `127.0.0.1:${RPC_PORT}:${RPC_PORT}`, IMAGE,
+      'tail', '-f', '/dev/null');
+  }
 
   const baseFlags = [
     '-regtest', `-datadir=${DATADIR}`, '-server=1', '-listen=0', '-txindex=1',
@@ -263,7 +266,7 @@ async function main() {
     rpc, token: '&TEST/SEC', poolRoot, maxRecipients: boot.info.maxrecipients,
     poolPublicKey, network: 'test', identity,
     message: 'hola desde la libreria',
-    messageType: 'group', timestamp: Math.floor(Date.parse('2026-08-27T00:00:00Z') / 1000)
+    messageType: 'group', timestamp: Math.floor(Date.now() / 1000)
   });
   const submit = await submitDepinMessage({
     rpc, identity, messageHex: built.hex, poolPublicKey
@@ -275,7 +278,7 @@ async function main() {
     rpc, token: '&TEST/SEC', poolRoot, maxRecipients: boot.info.maxrecipients,
     poolPublicKey, network: 'test', identity,
     message: 'segunda pagina', messageType: 'group',
-    timestamp: Math.floor(Date.parse('2026-08-27T00:00:01Z') / 1000)
+    timestamp: Math.floor(Date.now() / 1000) + 1
   });
   const submit2 = await submitDepinMessage({
     rpc, identity, messageHex: built2.hex, poolPublicKey
@@ -288,12 +291,11 @@ async function main() {
     rpc, identity, token: '&TEST/SEC', challenge: ch2.challenge, poolPublicKey, network: 'test',
     resolveSenderPubKey: async () => identity.publicKey, limit: 1
   });
-  // Core 347362b shadows the outer `hasMore` local while computing this
-  // field, so it currently serializes false even with another page. Preserve
-  // the wire value, but prove pagination through the signed cursor below.
-  check('receive pagination returns the requested first-page size',
-    page1.messages.length === 1 && typeof page1.hasMore === 'boolean',
-    `has_more=${page1.hasMore}`);
+  // Core may sign has_more=false even when another page exists. The client
+  // conservatively continues after a full page and keeps the signed raw value.
+  check('receive pagination continues after a full page',
+    page1.messages.length === 1 && page1.hasMore === true,
+    `raw_has_more=${page1.raw.has_more}, client_has_more=${page1.hasMore}`);
   const page2 = await receiveDepinMessages({
     rpc, identity, token: '&TEST/SEC', challenge: page1.nextChallenge,
     poolPublicKey, network: 'test', afterHash: page1.messages[0].hash, limit: 1,
@@ -367,6 +369,12 @@ try {
   exitCode = 1;
   console.error('\nE2E REGTEST: ABORTED —', e?.message ?? e);
 } finally {
-  try { docker('rm', '-f', CONTAINER); console.log(`Removed ${CONTAINER}`); } catch {}
+  if (EXTERNAL_CONTAINER) {
+    try { cli('stop'); } catch {}
+    await sleep(2000);
+    try { docker('exec', CONTAINER, 'rm', '-rf', '--', DATADIR); } catch {}
+  } else {
+    try { docker('rm', '-f', CONTAINER); console.log(`Removed ${CONTAINER}`); } catch {}
+  }
 }
 process.exit(exitCode);

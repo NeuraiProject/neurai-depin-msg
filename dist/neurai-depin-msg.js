@@ -5282,7 +5282,7 @@ var neuraiDepinMsg = (() => {
     });
     return {
       messages: decoded.messages,
-      hasMore: decoded.hasMore,
+      hasMore: limit > 0 && decoded.messages.length === limit ? true : decoded.hasMore,
       nextChallenge: decoded.nextChallenge,
       nextExpiresIn: decoded.nextExpiresIn,
       raw: opened

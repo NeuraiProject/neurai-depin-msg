@@ -515,6 +515,16 @@ test('receiveDepinMessages: a real message decrypts through the identity opener'
   assert.equal(res.messages.length, 1);
   assert.equal(res.messages[0].ok, true);
   assert.equal(res.messages[0].plaintext, 'hola holder');
+
+  // Core can sign has_more=false for a full page that has a successor.
+  const fullPage = await receiveDepinMessages({
+    rpc, identity, token: '&POOL/NEWS', challenge: CH,
+    poolPublicKey: POOL.pubCompressed, network: 'test', limit: 1,
+    resolveSenderPubKey: async () => sender.pub
+  });
+  assert.equal(fullPage.raw.has_more, false);
+  assert.equal(fullPage.hasMore, true);
+  assert.equal(fullPage.messages[0].hash, parsed.hash);
 });
 
 test('receiveDepinMessages: input validation rejects before the RPC', async () => {

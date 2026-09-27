@@ -650,6 +650,7 @@ export function decodeChallengeResult(
 
 export interface ReceiveMessagesResult {
   messages: ValidatedDepinMessage[];
+  /** Conservative when a limited page is full; use the cursor until an empty page. */
   hasMore: boolean | null;
   nextChallenge: string | null;
   nextExpiresIn: number | null;

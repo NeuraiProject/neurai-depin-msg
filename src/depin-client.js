@@ -436,6 +436,8 @@ async function requestDepinChallenge({ rpc, identity, token, poolPublicKey, type
  *           limit?, timestamp?, network, resolveSenderPubKey?,
  *           requestedToken?, limits? }.
  * Returns { messages, hasMore, nextChallenge, nextExpiresIn, raw }.
+ * A full limited page conservatively sets hasMore even if older nodes report
+ * false, so callers can continue with the signed cursor until an empty page.
  */
 async function receiveDepinMessages(params) {
   const {
@@ -493,7 +495,7 @@ async function receiveDepinMessages(params) {
 
   return {
     messages: decoded.messages,
-    hasMore: decoded.hasMore,
+    hasMore: limit > 0 && decoded.messages.length === limit ? true : decoded.hasMore,
     nextChallenge: decoded.nextChallenge,
     nextExpiresIn: decoded.nextExpiresIn,
     raw: opened

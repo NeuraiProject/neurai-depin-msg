@@ -1,16 +1,16 @@
-/**
- * DePIN only works with Legacy P2PKH addresses (node: depinchallenge.cpp,
- * depinmsgpool.cpp). neurai-key 5 witness addresses — generic AuthScript v1
- * (nc1p…/tnc1p…), post-quantum v2 (pq1z…/tpq1z…) and ECDSA v3 (nq1r…/tnq1r…)
- * — must fail with an explicit error, while Base58 P2PKH addresses that merely
- * start like a Bech32 HRP ('NQ1…', 'tNc1…') must keep decoding.
+/** The Legacy-only decoder refuses witness addresses. The generic DePIN decoder
+ * accepts Legacy and strict ECDSA; generic AuthScript and PQ remain unsupported.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  decodeP2PKHAddress, pubKeyMatchesAddress, createSoftwareIdentity,
-  buildDepinMessage, verifyDepinReceivedMessage,
-  base58CheckEncode, hexToBytes
+  decodeP2PKHAddress,
+  pubKeyMatchesAddress,
+  createSoftwareIdentity,
+  buildDepinMessage,
+  verifyDepinReceivedMessage,
+  base58CheckEncode,
+  hexToBytes,
 } from '../src/index.js';
 import { keypair } from './helpers.mjs';
 
@@ -23,10 +23,10 @@ const WITNESS_ADDRESSES = [
   ['tnq1r0c9zl485wv7wcfutxfyv8k2ltpfk5hdyp3s7g4chlphx8d2m6npqwxvjya', 3, 'test'],
   ['nq1rp2ggnqzc6tuflpvl8y546y47k267q8044kzc5p4t63h6ygry0trqsdg6zs', 3, 'mainnet'],
   // Pre-neurai-key-5 v1 form (nq/tnq + v1), now invalid on the node too.
-  ['tnq1pdsj0aztvgwv3rwgml360stpyp228zrggyga6n4sdenmetm6wv3tqzddk95', 1, 'test']
+  ['tnq1pdsj0aztvgwv3rwgml360stpyp228zrggyga6n4sdenmetm6wv3tqzddk95', 1, 'test'],
 ];
 
-const WITNESS_ERROR = /DePIN requires a Legacy P2PKH address \(neurai-key network 'xna-legacy' \/ 'xna-legacy-test'\); witness addresses \(nc1…, pq1…, nq1…\) are not accepted by the node/;
+const WITNESS_ERROR = /This decoder requires a Legacy P2PKH address; use decodeDepinAddress for Legacy or strict ECDSA/;
 
 for (const [address, version, network] of WITNESS_ADDRESSES) {
   test('witness v' + version + ' address ' + address.slice(0, 5) + '… is rejected with a clear error', async () => {
@@ -66,36 +66,18 @@ test('non-witness garbage keeps the original Base58 errors', async () => {
   // A mistyped Base58 look-alike is not reported as a witness address.
   await assert.rejects(decodeP2PKHAddress('NQ1EZZUfHwE4ntRyqW5LAFCcDZjLKxvGyX'), /Base58Check: checksum mismatch/);
   // Bech32 of another chain: not a Neurai witness HRP.
-  await assert.rejects(
-    decodeP2PKHAddress('bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq'),
-    /Invalid Base58 character/
-  );
+  await assert.rejects(decodeP2PKHAddress('bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq'), /Invalid Base58 character/);
 });
 
-test('identity, build and verify paths surface the witness error', async () => {
+test('strict ECDSA identities bind the exact public key and address', async () => {
+  const { encodeEcdsaAddress, decodeDepinAddress } = await import('../src/index.js');
   const k = keypair('11'.repeat(32));
-  const witness = 'tnq1r0c9zl485wv7wcfutxfyv8k2ltpfk5hdyp3s7g4chlphx8d2m6npqwxvjya';
-
-  await assert.rejects(pubKeyMatchesAddress(hexToBytes(k.pub), witness, 'test'), WITNESS_ERROR);
-
-  await assert.rejects(
-    createSoftwareIdentity({ privateKey: k.privHex, network: 'test', address: witness }),
-    WITNESS_ERROR
-  );
-
-  await assert.rejects(
-    buildDepinMessage({
-      token: '&NEWS', senderAddress: witness, senderPubKey: k.pub, privateKey: k.privHex,
-      message: 'hi', messageType: 'group', recipientPubKeys: [k.pub],
-      timestamp: 1700000000, network: 'test'
-    }),
-    WITNESS_ERROR
-  );
-
-  const result = await verifyDepinReceivedMessage({
-    token: '&NEWS', sender: witness, timestamp: 1700000000, messageType: 'group',
-    encryptedPayloadHex: '00', signatureHex: '3006020101020101'
-  }, { network: 'test' });
-  assert.equal(result.signatureValid, false);
-  assert.match(result.reason, /^sender address invalid: Unsupported witness v3 address/);
+  const address = encodeEcdsaAddress(hexToBytes(k.pub), 'test');
+  assert.equal((await decodeDepinAddress(address, 'test')).type, 'ecdsa');
+  assert.equal(await pubKeyMatchesAddress(hexToBytes(k.pub), address, 'test'), true);
+  assert.equal(await pubKeyMatchesAddress(hexToBytes(keypair('22'.repeat(32)).pub), address, 'test'), false);
+  await createSoftwareIdentity({ privateKey: k.privHex, network: 'test', address });
+  await assert.rejects(createSoftwareIdentity({ privateKey: '22'.repeat(32), network: 'test', address }), /does not correspond/);
+  await assert.rejects(decodeDepinAddress(address.toUpperCase(), 'test'));
+  await assert.rejects(decodeDepinAddress(address, 'mainnet'));
 });

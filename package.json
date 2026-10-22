@@ -1,6 +1,6 @@
 {
   "name": "@neuraiproject/neurai-depin-msg",
-  "version": "3.1.3",
+  "version": "4.0.0",
   "description": "Build, receive, validate and decrypt DePIN encrypted messages for Neurai blockchain",
   "type": "module",
   "main": "dist/neurai-depin-msg.cjs",
@@ -34,8 +34,7 @@
     "build:esm": "esbuild src/index.js --bundle --format=esm --packages=external --outfile=dist/neurai-depin-msg.mjs",
     "build:cjs": "esbuild src/index.js --bundle --format=cjs --packages=external --outfile=dist/neurai-depin-msg.cjs",
     "build:types": "node scripts/write-cjs-declarations.mjs",
-    "test": "node --test && npm run test:types && npm run test:package",
-    "gen-fixtures": "node scripts/generate-fixtures.mjs",
+    "test": "node --test test/*.test.mjs && npm run test:types && npm run test:package",
     "pretest": "npm run build",
     "test:types": "tsc -p tsconfig.types-nodenext.json && tsc -p tsconfig.types-node16.json && tsc -p tsconfig.types-bundler.json",
     "test:package": "node scripts/test-package.mjs && node scripts/check-package.mjs",
@@ -65,7 +64,8 @@
   "dependencies": {
     "@noble/ciphers": "^1.3.0",
     "@noble/curves": "^1.9.7",
-    "@noble/hashes": "^1.8.0"
+    "@noble/hashes": "^1.8.0",
+    "lossless-json": "^4.3.3"
   },
   "devDependencies": {
     "esbuild": "^0.28.0",

@@ -26,7 +26,7 @@ function run(command, args, cwd = packageRoot) {
   return execFileSync(command, args, {
     cwd,
     encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
 }
 
@@ -34,25 +34,20 @@ try {
   mkdirSync(tarballDirectory, { recursive: true });
   mkdirSync(consumerDirectory, { recursive: true });
 
-  const packOutput = run(npmCommand, [
-    'pack', '--ignore-scripts', '--pack-destination', tarballDirectory, '--json'
-  ]);
+  const packOutput = run(npmCommand, ['pack', '--ignore-scripts', '--pack-destination', tarballDirectory, '--json']);
   const packResult = JSON.parse(packOutput);
   // npm versions emit either an array or a package-name keyed object.
   const packed = Array.isArray(packResult) ? packResult[0] : Object.values(packResult)[0];
   if (!packed?.filename) throw new Error('npm pack returned no tarball filename');
   const tarball = join(tarballDirectory, packed.filename);
 
-  writeFileSync(
-    join(consumerDirectory, 'package.json'),
-    JSON.stringify({ private: true }, null, 2) + '\n'
-  );
-  run(npmCommand, [
-    'install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', tarball
-  ], consumerDirectory);
+  writeFileSync(join(consumerDirectory, 'package.json'), JSON.stringify({ private: true }, null, 2) + '\n');
+  run(npmCommand, ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund', tarball], consumerDirectory);
 
   // 1-2. ESM + CJS surface, retired symbols absent.
-  writeFileSync(join(consumerDirectory, 'runtime.mjs'), `
+  writeFileSync(
+    join(consumerDirectory, 'runtime.mjs'),
+    `
 import * as m from '@neuraiproject/neurai-depin-msg';
 const present = ['buildDepinMessage', 'signRecoverableMessage', 'verifyDepinReply',
   'decodeDepinPoolInfo', 'createSoftwareIdentity', 'requestDepinChallenge',
@@ -70,21 +65,27 @@ for (const name of retired) {
 const sig = m.signRecoverableMessage('gate probe', '11'.repeat(32));
 const pub = m.recoverPublicKeyFromMessage('gate probe', sig);
 if (!m.verifyRecoverableMessage('gate probe', sig, pub)) process.exit(1);
-`);
-  writeFileSync(join(consumerDirectory, 'runtime.cjs'), `
+`,
+  );
+  writeFileSync(
+    join(consumerDirectory, 'runtime.cjs'),
+    `
 const m = require('@neuraiproject/neurai-depin-msg');
 if (typeof m.buildDepinMessage !== 'function') process.exit(1);
 if (typeof m.verifyDepinReply !== 'function') process.exit(1);
 if (m.parseDepinPoolInfo !== undefined) process.exit(1);
 if (m.isPreAuthenticatedSentinel !== undefined) process.exit(1);
-`);
+`,
+  );
   run(process.execPath, ['runtime.mjs'], consumerDirectory);
   run(process.execPath, ['runtime.cjs'], consumerDirectory);
 
   // 3. IIFE in an isolated realm without Node globals. Merely shadowing
   // lexical names is insufficient because globalThis.Buffer/process would
   // still expose Node to the bundle.
-  writeFileSync(join(consumerDirectory, 'iife-probe.cjs'), `
+  writeFileSync(
+    join(consumerDirectory, 'iife-probe.cjs'),
+    `
 const { readFileSync } = require('node:fs');
 const { createContext, runInContext } = require('node:vm');
 const { webcrypto } = require('node:crypto');
@@ -114,11 +115,14 @@ if (api.parseDepinPoolInfo !== undefined || api.isPreAuthenticatedSentinel !== u
   console.error('IIFE still exposes retired protocol-1 symbols');
   process.exit(1);
 }
-`);
+`,
+  );
   run(process.execPath, ['iife-probe.cjs'], consumerDirectory);
 
   // 4. Minimal TypeScript consumer under NodeNext.
-  writeFileSync(join(consumerDirectory, 'consumer.mts'), `
+  writeFileSync(
+    join(consumerDirectory, 'consumer.mts'),
+    `
 import {
   createSoftwareIdentity, requestDepinChallenge, receiveDepinMessages,
   getDepinPoolInfo, submitDepinMessage, verifyDepinReply, openBoundReply,
@@ -142,24 +146,24 @@ async function usage(): Promise<void> {
   });
   const digest: Uint8Array = preimage.messageDigest;
   const digestHex: string = preimage.messageDigestHex;
-  const poolInfo = await getDepinPoolInfo({ rpc, serviceId: 'svc', trust });
+  const poolInfo = await getDepinPoolInfo({ rpc, serviceId: 'svc', trust, network: 'test' });
   const pin: PoolPin = poolInfo.pin;
   const c = await requestDepinChallenge({
-    rpc, identity, token: pin.poolRoot, poolPublicKey: pin.poolPublicKey
+    rpc, identity, token: pin.poolRoot, context: poolInfo.context
   });
   const r: ReceiveMessagesResult = await receiveDepinMessages({
     rpc, identity, token: pin.poolRoot, challenge: c.challenge,
-    poolPublicKey: pin.poolPublicKey, network: 'test'
+    context: poolInfo.context, network: 'test'
   });
   const verified: VerifiedDepinReply = verifyDepinReply({
-    reply: {}, method: 'depingetmsginfo', token: pin.poolRoot,
-    poolPublicKey: pin.poolPublicKey
+    reply: {}, method: 'depingetmsginfo', request: {protocol:5,request_id:'00'.repeat(32),timestamp_ms:1},
+    poolPublicKey: pin.poolPublicKey, expectedNetworkHash: poolInfo.context.network
   });
   await openBoundReply(verified, identity.openReply);
-  await submitDepinMessage({ rpc, identity, messageHex: '00', poolPublicKey: pin.poolPublicKey });
+  await submitDepinMessage({ rpc, identity, messageHex: '00', context: poolInfo.context });
   await buildDepinMessageForPool({
     rpc, identity, token: pin.poolRoot, poolRoot: pin.poolRoot,
-    poolPublicKey: pin.poolPublicKey, maxRecipients: 20,
+    context: poolInfo.context, maxRecipients: 20,
     message: 'x', messageType: 'group', timestamp: 1, network: 'test'
   });
   const sig: string = signRecoverableMessage('x', '11'.repeat(32));
@@ -167,14 +171,25 @@ async function usage(): Promise<void> {
   void [r, sig, wif.compressed, digest, digestHex];
 }
 void usage;
-`);
-  writeFileSync(join(consumerDirectory, 'tsconfig.json'), JSON.stringify({
-    compilerOptions: {
-      strict: true, noEmit: true, module: 'NodeNext',
-      moduleResolution: 'NodeNext', target: 'ES2022'
-    },
-    include: ['consumer.mts']
-  }, null, 2) + '\n');
+`,
+  );
+  writeFileSync(
+    join(consumerDirectory, 'tsconfig.json'),
+    JSON.stringify(
+      {
+        compilerOptions: {
+          strict: true,
+          noEmit: true,
+          module: 'NodeNext',
+          moduleResolution: 'NodeNext',
+          target: 'ES2022',
+        },
+        include: ['consumer.mts'],
+      },
+      null,
+      2,
+    ) + '\n',
+  );
 
   const typescriptBin = resolve(packageRoot, 'node_modules/typescript/bin/tsc');
   readFileSync(typescriptBin); // clear error if dev deps are missing

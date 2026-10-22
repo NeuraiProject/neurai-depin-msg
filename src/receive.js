@@ -12,18 +12,19 @@
 
 import { hexToBytes, bytesToHex, normalizeHex } from './bytes.js';
 import { normalizePrivateKeyTo32Bytes, isWIF, wifToHex, parsePublicKey } from './keys.js';
+import { eciesEncrypt, serializeEciesMessage, deserializeEciesMessage, eciesDecrypt } from './ecies.js';
 import {
-  eciesEncrypt, serializeEciesMessage, deserializeEciesMessage, eciesDecrypt
-} from './ecies.js';
-import {
-  MAX_DEPIN_RECIPIENTS, MAX_DEPIN_MESSAGE_SIZE, DEPIN_RECEIVE_MAX_LIMIT,
-  normalizeReceivedMessage, verifyDepinReceivedMessage
+  MAX_DEPIN_RECIPIENTS,
+  MAX_DEPIN_MESSAGE_SIZE,
+  DEPIN_RECEIVE_MAX_LIMIT,
+  normalizeReceivedMessage,
+  verifyDepinReceivedMessage,
 } from './message.js';
 import { isDepinTokenInScope } from './scope.js';
 
 const DEFAULT_LIMITS = {
   maxMessages: DEPIN_RECEIVE_MAX_LIMIT,
-  maxPayloadBytes: MAX_DEPIN_MESSAGE_SIZE * MAX_DEPIN_RECIPIENTS
+  maxPayloadBytes: 82 + MAX_DEPIN_MESSAGE_SIZE + 94 * MAX_DEPIN_RECIPIENTS,
 };
 
 /**
@@ -52,10 +53,10 @@ async function decryptDepinReceiveEncryptedPayload(encryptedPayloadHex, recipien
 async function decryptDepinReceivedMessage(message, privateKey) {
   const norm = normalizeReceivedMessage(message);
   const privKeyBytes = await normalizePrivateKeyTo32Bytes(privateKey);
-  const ecies = deserializeEciesMessage(norm.encryptedPayload);
+  const ecies = deserializeEciesMessage(norm.encryptedPayload, { maxPlaintext: MAX_DEPIN_MESSAGE_SIZE });
   const plaintextBytes = await eciesDecrypt(ecies, privKeyBytes);
   return {
-    plaintext: plaintextBytes === null ? null : new TextDecoder().decode(plaintextBytes)
+    plaintext: plaintextBytes === null ? null : new TextDecoder().decode(plaintextBytes),
   };
 }
 
@@ -89,7 +90,7 @@ async function validateAndDecryptDepinMessage(message, options = {}) {
     requestedToken = null,
     limits = {},
     senderPubKey = null,
-    resolveSenderPubKey = null
+    resolveSenderPubKey = null,
   } = options;
 
   const effLimits = { ...DEFAULT_LIMITS, ...limits };
@@ -102,7 +103,7 @@ async function validateAndDecryptDepinMessage(message, options = {}) {
     signatureValid: false,
     authentication: 'invalid',
     senderPubKey: null,
-    plaintext: null
+    plaintext: null,
   };
 
   let norm;
@@ -116,7 +117,7 @@ async function validateAndDecryptDepinMessage(message, options = {}) {
     token: norm.token,
     sender: norm.senderAddress,
     timestamp: norm.timestamp,
-    messageType: norm.messageTypeStr
+    messageType: norm.messageTypeStr,
   };
 
   if (norm.encryptedPayload.length === 0) {
@@ -134,7 +135,9 @@ async function validateAndDecryptDepinMessage(message, options = {}) {
   }
 
   const verification = await verifyDepinReceivedMessage(message, {
-    network, senderPubKey, resolveSenderPubKey
+    network,
+    senderPubKey,
+    resolveSenderPubKey,
   });
   result.hash = verification.hash;
   result.signatureValid = verification.signatureValid;
@@ -156,7 +159,7 @@ async function validateAndDecryptDepinMessage(message, options = {}) {
 
   if (privateKey !== null) {
     try {
-      const ecies = deserializeEciesMessage(norm.encryptedPayload);
+      const ecies = deserializeEciesMessage(norm.encryptedPayload, { maxPlaintext: MAX_DEPIN_MESSAGE_SIZE });
       const privKeyBytes = await normalizePrivateKeyTo32Bytes(privateKey);
       const plaintextBytes = await eciesDecrypt(ecies, privKeyBytes);
       if (plaintextBytes !== null) {
@@ -175,7 +178,7 @@ async function validateAndDecryptDepinMessage(message, options = {}) {
     try {
       // Structural check stays local so a malformed payload is still ok:false
       // even when the external opener would reject it for other reasons.
-      deserializeEciesMessage(norm.encryptedPayload);
+      deserializeEciesMessage(norm.encryptedPayload, { maxPlaintext: MAX_DEPIN_MESSAGE_SIZE });
     } catch (e) {
       result.ok = false;
       result.reason = 'encrypted payload is malformed: ' + e.message;
@@ -184,8 +187,7 @@ async function validateAndDecryptDepinMessage(message, options = {}) {
     try {
       const out = await openPayload(norm.encryptedPayload);
       if (out !== null && out !== undefined) {
-        result.plaintext =
-          typeof out === 'string' ? out : new TextDecoder().decode(out);
+        result.plaintext = typeof out === 'string' ? out : new TextDecoder().decode(out);
       }
     } catch {
       // External opener failure: leave plaintext null (not for this key).
@@ -214,8 +216,7 @@ async function decodeDepinReceiveResponse(rpcResult, options = {}) {
   let wasEncrypted = false;
   let payload = rpcResult;
 
-  if (payload && typeof payload === 'object' && !Array.isArray(payload) &&
-      typeof payload.encrypted === 'string') {
+  if (payload && typeof payload === 'object' && !Array.isArray(payload) && typeof payload.encrypted === 'string') {
     if (!privateKey) {
       throw new Error('privateKey is required to unwrap an { encrypted } response');
     }
@@ -245,9 +246,7 @@ async function decodeDepinReceiveResponse(rpcResult, options = {}) {
   }
 
   if (rawMessages.length > effLimits.maxMessages) {
-    throw new Error(
-      'Response has ' + rawMessages.length + ' messages, above the limit of ' + effLimits.maxMessages
-    );
+    throw new Error('Response has ' + rawMessages.length + ' messages, above the limit of ' + effLimits.maxMessages);
   }
 
   const seenHashes = new Set();
@@ -270,8 +269,7 @@ async function decodeDepinReceiveResponse(rpcResult, options = {}) {
   let nextChallenge = null;
   let nextExpiresIn = null;
   if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
-    if (typeof payload.next_challenge === 'string' &&
-        /^[0-9a-f]{64}$/.test(payload.next_challenge)) {
+    if (typeof payload.next_challenge === 'string' && /^[0-9a-f]{64}$/.test(payload.next_challenge)) {
       nextChallenge = payload.next_challenge;
       if (typeof payload.next_expires_in === 'number') {
         nextExpiresIn = payload.next_expires_in;
@@ -313,7 +311,7 @@ async function wrapMessageForServer(messageHex, serverPubKeyHex, senderAddress) 
 
   return {
     sender: senderAddress,
-    encrypted: bytesToHex(serializeEciesMessage(eciesMsg))
+    encrypted: bytesToHex(serializeEciesMessage(eciesMsg)),
   };
 }
 
@@ -349,5 +347,5 @@ export {
   validateAndDecryptDepinMessage,
   decodeDepinReceiveResponse,
   wrapMessageForServer,
-  unwrapMessageFromServer
+  unwrapMessageFromServer,
 };

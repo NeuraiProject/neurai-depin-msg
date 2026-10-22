@@ -10,18 +10,11 @@
  */
 
 import { secp256k1 } from '@noble/curves/secp256k1';
-import {
-  concatBytes, hexToBytes, bytesToHex, normalizeHex, timingSafeEqual
-} from './bytes.js';
+import { concatBytes, hexToBytes, bytesToHex, normalizeHex } from './bytes.js';
 import { doubleSha256, hash160 } from './hash.js';
-import {
-  serializeString, serializeVector, serializeInt64,
-  readString, readVector, readInt64
-} from './serialize.js';
-import {
-  isWIF, wifToHex, parsePublicKey, privateKeyMatchesPublicKey
-} from './keys.js';
-import { decodeP2PKHAddress } from './address.js';
+import { serializeString, serializeVector, serializeInt64, readString, readVector, readInt64 } from './serialize.js';
+import { isWIF, wifToHex, parsePublicKey, privateKeyMatchesPublicKey } from './keys.js';
+import { decodeDepinAddress, pubKeyMatchesAddress } from './address.js';
 import { eciesEncrypt, serializeEciesMessage } from './ecies.js';
 import { validateDepinSectionToken } from './scope.js';
 
@@ -59,7 +52,7 @@ function buildPreimageBytes({ token, senderAddress, timestamp, messageTypeByte, 
     serializeString(senderAddress),
     serializeInt64(timestamp),
     new Uint8Array([messageTypeByte]),
-    serializeVector(encryptedPayload)
+    serializeVector(encryptedPayload),
   );
 }
 
@@ -69,8 +62,8 @@ async function computeDepinMessageHashBytes(fields) {
 
 /**
  * Validates the common build inputs and resolves the final recipient set.
- * Keys keep their given serialization; identity is by curve point. The sender
- * is auto-included when its point is not already present. Returns
+ * Keys retain their serialization; identity is by exact destination. The sender
+ * is auto-included when its destination is not already present. Returns
  * { messageType, recipientKeyBytes, senderKey } with recipientKeyBytes being
  * the final, deduplicated list (Core's ECIES map size).
  */
@@ -84,54 +77,44 @@ async function prepareBuildInputs(params) {
 
   const senderKey = parsePublicKey(params.senderPubKey);
 
-  // The address is derived from the key bytes: bind exact serialization.
-  const { payload } = await decodeP2PKHAddress(params.senderAddress, params.network ?? null);
-  const senderKeyHash = await hash160(senderKey.bytes);
-  if (!timingSafeEqual(senderKeyHash, payload)) {
+  if (!(await pubKeyMatchesAddress(senderKey.bytes, params.senderAddress, params.network)))
     throw new Error('senderPubKey does not correspond to senderAddress');
-  }
 
   const messageType = normalizeMessageType(params.messageType);
 
-  if (!params.message) throw new Error('Message is required');
+  if (typeof params.message !== 'string' || !params.message.length) throw new Error('Message is required');
   if (!params.recipientPubKeys || params.recipientPubKeys.length === 0) {
     throw new Error('At least one recipient is required');
   }
-  if (!Number.isInteger(params.timestamp) || params.timestamp <= 0) {
+  if (!Number.isSafeInteger(params.timestamp) || params.timestamp <= 0) {
     throw new Error('Timestamp must be a positive integer');
   }
 
-  // Dedupe by curve point, keeping the first serialization seen.
-  const byPoint = new Map();
-  for (const pk of params.recipientPubKeys) {
-    const parsed = parsePublicKey(pk);
-    if (!byPoint.has(parsed.pointId)) byPoint.set(parsed.pointId, parsed.bytes);
-  }
-
-  if (messageType.byte === 0x01) {
-    const uniquePoints = new Set(byPoint.keys());
-    uniquePoints.add(senderKey.pointId);
-    if (uniquePoints.size > 2) {
-      throw new Error('messageType "private" allows only one recipient plus the sender');
+  const byIdentity = new Map();
+  for (const recipient of params.recipientPubKeys) {
+    const descriptor = recipient && typeof recipient === 'object' && !(recipient instanceof Uint8Array) ? recipient : null;
+    const parsed = parsePublicKey(descriptor ? descriptor.publicKey : recipient);
+    let id = bytesToHex(await hash160(parsed.bytes));
+    if (descriptor) {
+      if (!(await pubKeyMatchesAddress(parsed.bytes, descriptor.address, params.network)))
+        throw new Error('Recipient public key does not match address');
+      id = (await decodeDepinAddress(descriptor.address, params.network)).recipientId;
     }
+    if (!byIdentity.has(id)) byIdentity.set(id, descriptor ?? parsed.bytes);
   }
-
-  // Include the sender so it can decrypt its own messages.
-  if (!byPoint.has(senderKey.pointId)) {
-    byPoint.set(senderKey.pointId, senderKey.bytes);
-  }
-
-  if (byPoint.size > MAX_DEPIN_RECIPIENTS) {
-    throw new Error(
-      'Final recipient map has ' + byPoint.size + ' entries (sender included); ' +
-      'Core rejects more than ' + MAX_DEPIN_RECIPIENTS
-    );
-  }
+  const senderId = (await decodeDepinAddress(params.senderAddress, params.network)).recipientId;
+  if (!byIdentity.has(senderId)) byIdentity.set(senderId, { address: params.senderAddress, publicKey: senderKey.bytes });
+  if (messageType.byte === 1 && byIdentity.size > 2) throw new Error('messageType "private" allows only one recipient plus the sender');
+  if (byIdentity.size > MAX_DEPIN_RECIPIENTS) throw new Error('Final recipient map exceeds ' + MAX_DEPIN_RECIPIENTS);
+  const length = new TextEncoder().encode(params.message).length;
+  const maximum = params.maxMessageBytes ?? MAX_DEPIN_MESSAGE_SIZE;
+  if (!Number.isInteger(maximum) || maximum < 1 || maximum > MAX_DEPIN_MESSAGE_SIZE) throw new Error('Invalid plaintext size limit');
+  if (length > maximum) throw new Error('Message exceeds plaintext size limit');
 
   return {
     messageType,
     senderKey,
-    recipientKeyBytes: Array.from(byPoint.values())
+    recipientKeyBytes: Array.from(byIdentity.values()),
   };
 }
 
@@ -159,7 +142,7 @@ async function buildDepinMessage(params) {
     senderAddress: params.senderAddress,
     timestamp: params.timestamp,
     messageTypeByte: messageType.byte,
-    encryptedPayload
+    encryptedPayload,
   };
 
   // Core uses CHashWriter (SER_GETHASH): double-SHA256 of the preimage.
@@ -170,10 +153,7 @@ async function buildDepinMessage(params) {
   // noble: deterministic RFC6979, low-S canonical, DER as Core expects.
   const signature = secp256k1.sign(messageHashBytes, privateKey).toDERRawBytes();
 
-  const serialized = concatBytes(
-    buildPreimageBytes(fields),
-    serializeVector(signature)
-  );
+  const serialized = concatBytes(buildPreimageBytes(fields), serializeVector(signature));
 
   return {
     hex: bytesToHex(serialized),
@@ -181,7 +161,7 @@ async function buildDepinMessage(params) {
     messageHashBytes: bytesToHex(messageHashBytes),
     encryptedSize: encryptedPayload.length,
     recipientCount: recipientKeyBytes.length,
-    messageType: messageType.str
+    messageType: messageType.str,
   };
 }
 
@@ -206,7 +186,7 @@ async function buildDepinPreimage(params) {
     senderAddress: params.senderAddress,
     timestamp: params.timestamp,
     messageTypeByte: messageType.byte,
-    encryptedPayload
+    encryptedPayload,
   };
   const messageDigest = await computeDepinMessageHashBytes(fields);
 
@@ -217,7 +197,7 @@ async function buildDepinPreimage(params) {
     messageType: messageType.str,
     messageTypeByte: messageType.byte,
     encryptedSize: encryptedPayload.length,
-    recipientCount: recipientKeyBytes.length
+    recipientCount: recipientKeyBytes.length,
   };
 }
 
@@ -232,7 +212,7 @@ async function assembleDepinMessage(params, signatureHexOrBytes) {
   if (!params.senderAddress) throw new Error('Sender address is required');
   if (!params.encryptedPayloadHex) throw new Error('encryptedPayloadHex is required');
   const messageType = normalizeMessageType(params.messageType);
-  if (!Number.isInteger(params.timestamp) || params.timestamp <= 0) {
+  if (!Number.isSafeInteger(params.timestamp) || params.timestamp <= 0) {
     throw new Error('Timestamp must be a positive integer');
   }
   if (!signatureHexOrBytes) throw new Error('signature is required');
@@ -265,22 +245,19 @@ async function assembleDepinMessage(params, signatureHexOrBytes) {
     senderAddress: params.senderAddress,
     timestamp: params.timestamp,
     messageTypeByte: messageType.byte,
-    encryptedPayload
+    encryptedPayload,
   };
   const messageHashBytes = await computeDepinMessageHashBytes(fields);
   const messageHash = bytesToHex(messageHashBytes.slice().reverse());
 
-  const serialized = concatBytes(
-    buildPreimageBytes(fields),
-    serializeVector(signature)
-  );
+  const serialized = concatBytes(buildPreimageBytes(fields), serializeVector(signature));
 
   return {
     hex: bytesToHex(serialized),
     messageHash,
     messageHashBytes: bytesToHex(messageHashBytes),
     encryptedSize: encryptedPayload.length,
-    messageType: messageType.str
+    messageType: messageType.str,
   };
 }
 
@@ -290,7 +267,7 @@ async function assembleDepinMessage(params, signatureHexOrBytes) {
  * plus the computed message hash (byte-reversed hex, as displayed by Core).
  */
 async function parseDepinMessage(hexOrBytes, options = {}) {
-  const { maxPayloadBytes = MAX_DEPIN_MESSAGE_SIZE * MAX_DEPIN_RECIPIENTS } = options;
+  const { maxPayloadBytes = 82 + MAX_DEPIN_MESSAGE_SIZE + 94 * MAX_DEPIN_RECIPIENTS } = options;
 
   let bytes;
   if (hexOrBytes instanceof Uint8Array) {
@@ -301,10 +278,11 @@ async function parseDepinMessage(hexOrBytes, options = {}) {
     bytes = hexToBytes(norm);
   }
 
+  if (bytes.length > 16384) throw new Error('Message exceeds wire limit');
   let offset = 0;
-  const tokenRes = readString(bytes, offset, 1024);
+  const tokenRes = readString(bytes, offset, 128);
   offset = tokenRes.offset;
-  const senderRes = readString(bytes, offset, 1024);
+  const senderRes = readString(bytes, offset, 64);
   offset = senderRes.offset;
   const tsRes = readInt64(bytes, offset);
   offset = tsRes.offset;
@@ -318,7 +296,7 @@ async function parseDepinMessage(hexOrBytes, options = {}) {
 
   const payloadRes = readVector(bytes, offset, maxPayloadBytes);
   offset = payloadRes.offset;
-  const sigRes = readVector(bytes, offset, 144);
+  const sigRes = readVector(bytes, offset, 80);
   offset = sigRes.offset;
 
   if (offset !== bytes.length) throw new Error('CDepinMessage: trailing bytes after message');
@@ -328,7 +306,7 @@ async function parseDepinMessage(hexOrBytes, options = {}) {
     senderAddress: senderRes.value,
     timestamp: tsRes.value,
     messageTypeByte,
-    encryptedPayload: payloadRes.data
+    encryptedPayload: payloadRes.data,
   };
   const hashBytes = await computeDepinMessageHashBytes(fields);
 
@@ -343,7 +321,7 @@ async function parseDepinMessage(hexOrBytes, options = {}) {
     isPreAuthenticated: isPreAuthenticatedSentinel(sigRes.data),
     hash: bytesToHex(hashBytes.slice().reverse()),
     hashBytes: bytesToHex(hashBytes),
-    size: bytes.length
+    size: bytes.length,
   };
 }
 
@@ -369,7 +347,7 @@ function normalizeReceivedMessage(message) {
   if (typeof senderAddress !== 'string' || senderAddress.length === 0) {
     throw new Error('Message sender missing');
   }
-  if (!Number.isInteger(timestamp) || timestamp <= 0) throw new Error('Message timestamp invalid');
+  if (!Number.isSafeInteger(timestamp) || timestamp <= 0) throw new Error('Message timestamp invalid');
 
   const messageType = normalizeMessageType(rawType);
 
@@ -394,7 +372,7 @@ function normalizeReceivedMessage(message) {
     messageTypeByte: messageType.byte,
     encryptedPayload: hexToBytes(normPayload),
     signature: hexToBytes(normSig),
-    claimedHash: normClaimedHash
+    claimedHash: normClaimedHash,
   };
 }
 
@@ -429,7 +407,7 @@ async function verifyDepinReceivedMessage(message, options = {}) {
       authentication: 'invalid',
       hash: null,
       senderPubKey: null,
-      reason: e.message
+      reason: e.message,
     };
   }
 
@@ -448,9 +426,8 @@ async function verifyDepinReceivedMessage(message, options = {}) {
     return result;
   }
 
-  let addressPayload;
   try {
-    ({ payload: addressPayload } = await decodeP2PKHAddress(norm.senderAddress, network));
+    await decodeDepinAddress(norm.senderAddress, network);
   } catch (e) {
     result.reason = 'sender address invalid: ' + e.message;
     return result;
@@ -477,8 +454,7 @@ async function verifyDepinReceivedMessage(message, options = {}) {
       result.reason = 'supplied sender public key invalid: ' + e.message;
       return result;
     }
-    const keyHash = await hash160(parsed.bytes);
-    if (!timingSafeEqual(keyHash, addressPayload)) {
+    if (!(await pubKeyMatchesAddress(parsed.bytes, norm.senderAddress, network))) {
       result.reason = 'supplied sender public key does not match sender address';
       return result;
     }
@@ -503,8 +479,7 @@ async function verifyDepinReceivedMessage(message, options = {}) {
     }
     for (const compressed of [true, false]) {
       const candidate = point.toRawBytes(compressed);
-      const keyHash = await hash160(candidate);
-      if (timingSafeEqual(keyHash, addressPayload)) {
+      if (await pubKeyMatchesAddress(candidate, norm.senderAddress, network)) {
         result.signatureValid = true;
         result.authentication = 'signature';
         result.senderPubKey = bytesToHex(candidate);
@@ -530,5 +505,5 @@ export {
   assembleDepinMessage,
   parseDepinMessage,
   normalizeReceivedMessage,
-  verifyDepinReceivedMessage
+  verifyDepinReceivedMessage,
 };

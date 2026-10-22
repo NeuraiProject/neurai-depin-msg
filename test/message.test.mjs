@@ -1,10 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildDepinMessage, buildDepinPreimage, assembleDepinMessage,
-  parseDepinMessage, verifyDepinReceivedMessage,
-  hexToBytes, bytesToHex, doubleSha256, concatBytes,
-  MAX_DEPIN_RECIPIENTS
+  buildDepinMessage,
+  buildDepinPreimage,
+  assembleDepinMessage,
+  parseDepinMessage,
+  verifyDepinReceivedMessage,
+  hexToBytes,
+  bytesToHex,
+  doubleSha256,
+  concatBytes,
+  MAX_DEPIN_RECIPIENTS,
 } from '../src/index.js';
 import { isPreAuthenticatedSentinel } from '../src/message.js';
 import { serializeString, serializeVector, serializeInt64 } from '../src/serialize.js';
@@ -22,7 +28,7 @@ function rpcShape(parsed) {
     timestamp: parsed.timestamp,
     message_type: parsed.messageType,
     encrypted_payload_hex: parsed.encryptedPayloadHex,
-    signature_hex: parsed.signatureHex
+    signature_hex: parsed.signatureHex,
   };
 }
 
@@ -38,30 +44,23 @@ test('build -> parse -> recovery-verify round trip', async () => {
   assert.equal(ver.senderPubKey, sender.pub);
 });
 
-test('same key in both serializations dedupes to one point', async () => {
-  const built = await buildDepinMessage(await baseParams({
-    recipientPubKeys: [B.pubCompressed, B.pubUncompressed]
-  }));
-  // B once + sender = 2 entries
-  assert.equal(built.recipientCount, 2);
+test('different Legacy serializations retain distinct destination identities', async () => {
+  const built = await buildDepinMessage(
+    await baseParams({
+      recipientPubKeys: [B.pubCompressed, B.pubUncompressed],
+    }),
+  );
+  // Two Legacy addresses plus the sender.
+  assert.equal(built.recipientCount, 3);
 });
 
-test('private type counts points, not serializations', async () => {
-  // recipient given in both forms is still ONE recipient -> valid private
-  const ok = await buildDepinMessage(await baseParams({
-    messageType: 'private',
-    recipientPubKeys: [B.pubCompressed, B.pubUncompressed]
-  }));
-  assert.equal(ok.messageType, 'private');
-  assert.equal(ok.recipientCount, 2);
-
+test('private messages count destination identities, including key serialization', async () => {
   await assert.rejects(
-    buildDepinMessage(await baseParams({
-      messageType: 'private',
-      recipientPubKeys: [B.pubCompressed, C.pubCompressed]
-    })),
-    /allows only one recipient/
+    buildDepinMessage(await baseParams({ messageType: 'private', recipientPubKeys: [B.pubCompressed, B.pubUncompressed] })),
+    /allows only one recipient/,
   );
+  const ok = await buildDepinMessage(await baseParams({ messageType: 'private', recipientPubKeys: [B.pubCompressed, B.pubCompressed] }));
+  assert.equal(ok.recipientCount, 2);
 });
 
 test('final map limit counts the auto-included sender', async () => {
@@ -76,37 +75,32 @@ test('final map limit counts the auto-included sender', async () => {
   assert.equal(ok.recipientCount, MAX_DEPIN_RECIPIENTS);
 
   // 50 holders, sender NOT among them -> 51 entries: rejected
-  await assert.rejects(
-    buildDepinMessage(await baseParams({ recipientPubKeys: many })),
-    /sender included/
-  );
+  await assert.rejects(buildDepinMessage(await baseParams({ recipientPubKeys: many })), /Final recipient map/);
 });
 
 test('key coherence: privateKey<->senderPubKey<->senderAddress', async () => {
-  await assert.rejects(
-    buildDepinMessage(await baseParams({ privateKey: B.privHex })),
-    /privateKey does not correspond/
-  );
-  await assert.rejects(
-    buildDepinMessage(await baseParams({ senderPubKey: B.pub })),
-    /senderPubKey does not correspond to senderAddress/
-  );
+  await assert.rejects(buildDepinMessage(await baseParams({ privateKey: B.privHex })), /privateKey does not correspond/);
+  await assert.rejects(buildDepinMessage(await baseParams({ senderPubKey: B.pub })), /senderPubKey does not correspond to senderAddress/);
   // address form binding: sender's address derived from the UNCOMPRESSED key
   // does not match the compressed senderPubKey
   await assert.rejects(
-    buildDepinMessage(await baseParams({
-      senderAddress: await addressFor(sender.pubUncompressed)
-    })),
-    /senderPubKey does not correspond to senderAddress/
+    buildDepinMessage(
+      await baseParams({
+        senderAddress: await addressFor(sender.pubUncompressed),
+      }),
+    ),
+    /senderPubKey does not correspond to senderAddress/,
   );
 });
 
 test('uncompressed sender end-to-end', async () => {
   const addr = await addressFor(sender.pubUncompressed);
-  const built = await buildDepinMessage(await baseParams({
-    senderAddress: addr,
-    senderPubKey: sender.pubUncompressed
-  }));
+  const built = await buildDepinMessage(
+    await baseParams({
+      senderAddress: addr,
+      senderPubKey: sender.pubUncompressed,
+    }),
+  );
   const parsed = await parseDepinMessage(built.hex);
   const ver = await verifyDepinReceivedMessage(rpcShape(parsed), { network: 'test' });
   assert.equal(ver.signatureValid, true);
@@ -119,10 +113,7 @@ test('invalid tokens and inputs rejected at build', async () => {
   await assert.rejects(buildDepinMessage(await baseParams({ timestamp: 0 })), /Timestamp/);
   await assert.rejects(buildDepinMessage(await baseParams({ timestamp: 1.5 })), /Timestamp/);
   await assert.rejects(buildDepinMessage(await baseParams({ messageType: 'broadcast' })), /messageType/);
-  await assert.rejects(
-    buildDepinMessage(await baseParams({ recipientPubKeys: ['02deadbeef'] })),
-    /Public key|Invalid secp256k1/
-  );
+  await assert.rejects(buildDepinMessage(await baseParams({ recipientPubKeys: ['02deadbeef'] })), /Public key|Invalid secp256k1/);
 });
 
 test('preimage + assemble equals direct build', async () => {
@@ -136,20 +127,23 @@ test('preimage + assemble equals direct build', async () => {
     serializeString(params.senderAddress),
     serializeInt64(params.timestamp),
     new Uint8Array([pre.messageTypeByte]),
-    serializeVector(hexToBytes(pre.encryptedPayloadHex))
+    serializeVector(hexToBytes(pre.encryptedPayloadHex)),
   );
   const hash = await doubleSha256(preimage);
   assert.deepEqual(pre.messageDigest, hash);
   assert.equal(pre.messageDigestHex, bytesToHex(hash));
   const der = secp256k1.sign(hash, sender.priv).toDERRawBytes();
 
-  const assembled = await assembleDepinMessage({
-    token: params.token,
-    senderAddress: params.senderAddress,
-    encryptedPayloadHex: pre.encryptedPayloadHex,
-    messageType: params.messageType,
-    timestamp: params.timestamp
-  }, bytesToHex(der));
+  const assembled = await assembleDepinMessage(
+    {
+      token: params.token,
+      senderAddress: params.senderAddress,
+      encryptedPayloadHex: pre.encryptedPayloadHex,
+      messageType: params.messageType,
+      timestamp: params.timestamp,
+    },
+    bytesToHex(der),
+  );
 
   const parsed = await parseDepinMessage(assembled.hex);
   const ver = await verifyDepinReceivedMessage(rpcShape(parsed), { network: 'test' });
@@ -157,23 +151,32 @@ test('preimage + assemble equals direct build', async () => {
 
   // compact 64-byte signatures are DER-normalized
   const compactSig = secp256k1.sign(hash, sender.priv).toCompactRawBytes();
-  const assembled2 = await assembleDepinMessage({
-    token: params.token,
-    senderAddress: params.senderAddress,
-    encryptedPayloadHex: pre.encryptedPayloadHex,
-    messageType: params.messageType,
-    timestamp: params.timestamp
-  }, compactSig);
+  const assembled2 = await assembleDepinMessage(
+    {
+      token: params.token,
+      senderAddress: params.senderAddress,
+      encryptedPayloadHex: pre.encryptedPayloadHex,
+      messageType: params.messageType,
+      timestamp: params.timestamp,
+    },
+    compactSig,
+  );
   assert.equal(assembled2.hex, assembled.hex);
 
   // garbage signatures are rejected
-  await assert.rejects(assembleDepinMessage({
-    token: params.token,
-    senderAddress: params.senderAddress,
-    encryptedPayloadHex: pre.encryptedPayloadHex,
-    messageType: params.messageType,
-    timestamp: params.timestamp
-  }, 'deadbeef'), /not valid DER/);
+  await assert.rejects(
+    assembleDepinMessage(
+      {
+        token: params.token,
+        senderAddress: params.senderAddress,
+        encryptedPayloadHex: pre.encryptedPayloadHex,
+        messageType: params.messageType,
+        timestamp: params.timestamp,
+      },
+      'deadbeef',
+    ),
+    /not valid DER/,
+  );
 });
 
 test('legacy preimage signature (no messageType) is rejected', async () => {
@@ -184,18 +187,21 @@ test('legacy preimage signature (no messageType) is rejected', async () => {
     serializeString(params.token),
     serializeString(params.senderAddress),
     serializeInt64(params.timestamp),
-    serializeVector(hexToBytes(pre.encryptedPayloadHex)) // NO messageType byte
+    serializeVector(hexToBytes(pre.encryptedPayloadHex)), // NO messageType byte
   );
   const legacyHash = await doubleSha256(legacyPreimage);
   const der = secp256k1.sign(legacyHash, sender.priv).toDERRawBytes();
 
-  const assembled = await assembleDepinMessage({
-    token: params.token,
-    senderAddress: params.senderAddress,
-    encryptedPayloadHex: pre.encryptedPayloadHex,
-    messageType: params.messageType,
-    timestamp: params.timestamp
-  }, bytesToHex(der));
+  const assembled = await assembleDepinMessage(
+    {
+      token: params.token,
+      senderAddress: params.senderAddress,
+      encryptedPayloadHex: pre.encryptedPayloadHex,
+      messageType: params.messageType,
+      timestamp: params.timestamp,
+    },
+    bytesToHex(der),
+  );
 
   const parsed = await parseDepinMessage(assembled.hex);
   const ver = await verifyDepinReceivedMessage(rpcShape(parsed), { network: 'test' });
@@ -218,7 +224,7 @@ test('tampering is detected', async () => {
   const badPayload = {
     ...shape,
     hash: undefined,
-    encrypted_payload_hex: shape.encrypted_payload_hex.slice(0, -2) + 'ff'
+    encrypted_payload_hex: shape.encrypted_payload_hex.slice(0, -2) + 'ff',
   };
   const v2 = await verifyDepinReceivedMessage(badPayload, { network: 'test' });
   assert.equal(v2.signatureValid, false);
@@ -254,7 +260,7 @@ test('supplied sender key is bound to the address before use', async () => {
 
   const resolved = await verifyDepinReceivedMessage(shape, {
     network: 'test',
-    resolveSenderPubKey: async () => sender.pub
+    resolveSenderPubKey: async () => sender.pub,
   });
   assert.equal(resolved.signatureValid, true);
 });

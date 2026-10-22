@@ -1,700 +1,206 @@
-/**
- * Protocol-2 client flows against a FAKE POOL and a scripted DepinRpc
- * (plan v2 §6.2): deterministic signed fixtures — we own the fake pool's
- * key, so its envelopes are legitimately signed — plus assertions on exact
- * methods/params, verification-before-decryption, capability failures,
- * timestamp monotonicity and the absence of implicit retries.
- */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  resolveDepinRecipients, decodeDepinRecipients, buildDepinMessageForPool,
-  requestDepinChallenge, receiveDepinMessages, submitDepinMessage,
-  clearDepinMessages, listDepinSectionsPublic, listDepinSectionsPrivate,
-  getDepinPoolInfo,
-  buildDepinRequestPreimage, buildDepinGetPreimage, buildDepinClearPreimage,
-  buildDepinReplyPreimage, signRecoverableMessage, verifyRecoverableMessage,
-  createSoftwareIdentity,
-  buildDepinMessage, parseDepinMessage,
-  eciesEncrypt, serializeEciesMessage, deserializeEciesMessage, eciesDecrypt,
-  bytesToHex, hexToBytes,
-  decryptDepinReceiveEncryptedPayload,
-  DepinProtocolError, DepinReplyAuthenticationError, DepinCapabilityError
-} from '../src/index.js';
-import { keypair, addressFor } from './helpers.mjs';
-
-const POOL = keypair('66'.repeat(32));
-const sender = keypair('11'.repeat(32));
-const B = keypair('22'.repeat(32));
-const C = keypair('33'.repeat(32));
-const D = keypair('44'.repeat(32));
-const HOLDER = keypair('77'.repeat(32));
-
-const CH = 'ab'.repeat(32);
-const CH2 = 'cd'.repeat(32);
-
-function signReply(method, token, address, challenge, replyHex) {
-  const preimage = buildDepinReplyPreimage({ method, token, address, challenge, replyHex });
-  return signRecoverableMessage(preimage, POOL.privHex);
-}
-
-function plainReply(method, token, bodyObj) {
-  const body = bytesToHex(new TextEncoder().encode(JSON.stringify(bodyObj)));
-  return { body, poolsig: signReply(method, token, '', '', body) };
-}
-
-async function boundReply(method, token, address, challenge, resultObj, recipientPub) {
-  const plaintext = new TextEncoder().encode(JSON.stringify(resultObj));
-  const ecies = await eciesEncrypt(plaintext, [hexToBytes(recipientPub)]);
-  const encrypted = bytesToHex(serializeEciesMessage(ecies));
-  return { encrypted, poolsig: signReply(method, token, address, challenge, encrypted) };
-}
-
-function mockRpc(responder) {
-  const calls = [];
-  return {
-    calls,
-    rpc: {
-      call: async (method, params) => {
-        calls.push({ method, params });
-        return responder(method, params, calls.length);
-      }
-    }
-  };
-}
-
-async function holderIdentity() {
-  return createSoftwareIdentity({ privateKey: HOLDER.privHex, network: 'test' });
-}
-
-async function holdersResponse(overrides = {}) {
-  return {
-    token: '&POOL/NEWS',
-    stop_at: '&POOL',
-    ancestors: ['&POOL/NEWS', '&POOL'],
-    recipients: [
-      { address: await addressFor(B.pubCompressed), pubkey: B.pubCompressed },
-      { address: await addressFor(C.pubUncompressed), pubkey: C.pubUncompressed }
-    ],
-    returned: 2,
-    max_results: 4,
-    truncated: false,
-    skipped_no_pubkey: 0,
-    skipped_no_pubkey_complete: true,
-    skipped_restricted: 0,
-    skipped_restricted_complete: true,
-    ...overrides
-  };
-}
-
-const baseArgs = () => ({
-  token: '&POOL/NEWS',
-  poolRoot: '&POOL',
-  maxRecipients: 3,
-  senderPubKey: sender.pub,
-  poolPublicKey: POOL.pubCompressed,
-  network: 'test'
-});
-
-// ---------------------------------------------------------------------------
-// Recipients: signed envelope (§8.1/§8.3)
-// ---------------------------------------------------------------------------
-
-test('resolveDepinRecipients verifies the signed envelope, then decodes', async () => {
-  const body = await holdersResponse();
-  const { rpc, calls } = mockRpc(() =>
-    plainReply('depingetancestorrecipients', '&POOL/NEWS', body)
-  );
-  const res = await resolveDepinRecipients({ ...baseArgs(), rpc });
-  assert.deepEqual(calls[0], {
-    method: 'depingetancestorrecipients',
-    params: ['&POOL/NEWS', 4, '&POOL'] // maxRecipients + 1
+import * as lib from '../src/index.js';
+import { context, pool, holder, reply, mockRpc, CH, bootstrapBody, directory } from './rpc5-helpers.mjs';
+for (const family of ['legacy', 'ecdsa']) {
+  test(`${family}: challenge, sequence pages, exact cursor, fresh ids and private sections`, async () => {
+    const identity = await holder(family);
+    const requests = [];
+    const rpc = mockRpc(async (method, r) => {
+      requests.push(r);
+      assert.equal(r.protocol, 5);
+      assert.equal(
+        await lib.pubKeyMatchesAddress(
+          lib.hexToBytes(
+            lib.recoverPublicKeyFromMessage(lib.buildDepinRpcRequestPreimage({ method, request: r }), r.signature, identity.address),
+          ),
+          identity.address,
+        ),
+        true,
+      );
+      const body =
+        method === 'depinchallenge'
+          ? { challenge: CH, expires_in: 30, type: 'receive' }
+          : method === 'depinlistsections'
+            ? { sections: [{ name: '&POOL/NEWS' }], next_challenge: CH, next_expires_in: 300 }
+            : {
+                messages: [],
+                has_more: false,
+                next_challenge: CH,
+                next_expires_in: 300,
+                cursor: {
+                  version: 1,
+                  stream_id: '55'.repeat(32),
+                  after_seq: 9007199254740993n,
+                  scope: r.token,
+                  address: r.address,
+                  from_timestamp: r.args.from_timestamp,
+                },
+              };
+      return reply(method, r, body, { identity });
+    });
+    const challenge = await lib.requestDepinChallenge({ rpc, context, identity, token: '&POOL/NEWS' });
+    assert.equal(challenge.challenge, CH);
+    const page = await lib.receiveDepinMessages({ rpc, context, identity, token: '&POOL/NEWS', challenge: CH, network: 'test' });
+    assert.equal(page.cursor.after_seq, 9007199254740993n);
+    assert.equal(page.hasMore, false);
+    await lib.receiveDepinMessages({ rpc, context, identity, token: '&POOL/NEWS', challenge: CH, network: 'test', cursor: page.cursor });
+    assert.equal(requests[2].args.cursor.after_seq, 9007199254740993n);
+    assert.equal(new Set(requests.map((r) => r.request_id)).size, 3);
+    const sections = await lib.listDepinSectionsPrivate({ rpc, context, identity, scope: '&POOL/NEWS', challenge: CH });
+    assert.equal(sections.sections.length, 1);
   });
-  assert.equal(res.recipientCount, 3); // B + C + sender
-  assert.equal(res.senderIncludedInHolders, false);
-  assert.deepEqual(res.recipientPubKeys, [B.pubCompressed, C.pubUncompressed]);
-});
-
-test('a raw (unsigned) recipients result is refused as a protocol error', async () => {
-  const { rpc } = mockRpc(async () => holdersResponse());
-  await assert.rejects(resolveDepinRecipients({ ...baseArgs(), rpc }), DepinProtocolError);
-});
-
-test('a tampered recipients poolsig is refused before interpreting the body', async () => {
-  const body = await holdersResponse();
-  const { rpc } = mockRpc(() => {
-    const reply = plainReply('depingetancestorrecipients', '&POOL/NEWS', body);
-    reply.poolsig = plainReply('depingetancestorrecipients', '&OTRO', body).poolsig;
-    return reply;
+  test(`${family}: recipient directory -> local encryption/signing -> authenticated submission`, async () => {
+    const identity = await holder(family),
+      recipient = await holder(family, '88'.repeat(32));
+    const rpc = mockRpc(async (method, r) => {
+      if (method === 'depingetancestorrecipients') return reply(method, r, directory([identity, recipient]));
+      assert.equal(method, 'depinsubmitmsg');
+      assert.equal(r.token, '');
+      assert.equal(r.address, identity.address);
+      const outer = lib.deserializeEciesMessage(lib.hexToBytes(r.args.encrypted));
+      const inner = await lib.eciesDecrypt(outer, lib.hexToBytes('66'.repeat(32)), pool.address);
+      const parsed = await lib.parseDepinMessage(new TextDecoder().decode(inner));
+      assert.equal((await lib.verifyDepinReceivedMessage(parsed, { network: 'test' })).signatureValid, true);
+      assert.equal(await lib.decryptDepinReceiveEncryptedPayload(parsed.encryptedPayloadHex, '88'.repeat(32)), 'hello');
+      return reply(method, r, { result: 'success', hash: parsed.hash }, { identity });
+    });
+    const built = await lib.buildDepinMessageForPool({
+      rpc,
+      context,
+      identity,
+      token: '&POOL/NEWS',
+      poolRoot: '&POOL',
+      maxRecipients: 20,
+      network: 'test',
+      message: 'hello',
+      timestamp: 1700000000,
+      messageType: 'group',
+    });
+    assert.equal(built.recipientCount, 2);
+    const receipt = await lib.submitDepinMessage({ rpc, context: built.context, identity, messageHex: built.hex });
+    assert.equal(receipt.hash, built.messageHash);
   });
+}
+test('bootstrap pins genesis, key and root; TOFU is explicit and RPC2 has no fallback', async () => {
+  const rpc = mockRpc((m, r) => reply(m, r, bootstrapBody()));
+  const result = await lib.getDepinPoolInfo({ rpc, serviceId: 'service', trust: { mode: 'tofu' }, network: 'test' });
+  assert.equal(result.context.pool_pubkey, pool.publicKey);
+  assert.equal(result.pin.network, context.network);
+  await lib.getDepinPoolInfo({ rpc, serviceId: 'service', trust: { mode: 'pinned', pin: result.pin }, network: 'test' });
+  await assert.rejects(lib.getDepinPoolInfo({ rpc, serviceId: 'service', trust: { mode: 'tofu' }, network: 'mainnet' }), /network|genesis/);
   await assert.rejects(
-    resolveDepinRecipients({ ...baseArgs(), rpc }),
-    DepinReplyAuthenticationError
+    lib.getDepinPoolInfo({ rpc, serviceId: 'other', trust: { mode: 'pinned', pin: result.pin }, network: 'test' }),
+    /service/,
   );
+  const old = mockRpc(() => ({ body: '7b7d', poolsig: 'x' }));
+  await assert.rejects(lib.getDepinPoolInfo({ rpc: old, serviceId: 'service', trust: { mode: 'tofu' }, network: 'test' }));
+  assert.equal(old.calls.length, 1);
 });
-
-test('decodeDepinRecipients: contract violations fail closed', async () => {
-  const args = {
-    token: '&POOL/NEWS', poolRoot: '&POOL', maxRecipients: 3,
-    senderPubKey: sender.pub, network: 'test'
-  };
-  for (const [patch, re] of [
-    [{ truncated: true }, /truncated/],
-    [{ token: '&POOL/OTHER' }, /does not match requested/],
-    [{ stop_at: '&POOL/NEWS' }, /does not match pool root/],
-    [{ returned: 5 }, /returned count/],
-    [{ ancestors: ['&POOL'] }, /ancestors is inconsistent/],
-    [{ recipients: 'nope' }, /not an array/]
-  ]) {
+test('signed membership change yields actionable error and never retries a write', async () => {
+  const identity = await holder();
+  const served = { ...context, membership_revision: '99'.repeat(32) };
+  const rpc = mockRpc((m, r) =>
+    reply(
+      m,
+      r,
+      {
+        error: {
+          code: -32600,
+          message: 'Membership changed',
+          data: { depin_error: 'membership_stale', refresh_recipients: true, renew_challenge: true },
+        },
+      },
+      { identity, served },
+    ),
+  );
+  await assert.rejects(
+    lib.clearDepinMessages({ rpc, context, identity, scope: '', challenge: CH, mode: 'all' }),
+    (e) =>
+      e instanceof lib.DepinRpcError && e.depinError === 'membership_stale' && e.context.membership_revision === served.membership_revision,
+  );
+  assert.equal(rpc.calls.length, 1);
+});
+test('directory cannot merge Legacy and strict identities of the same key', async () => {
+  const legacy = await holder(),
+    strict = await holder('ecdsa');
+  const result = await lib.decodeDepinRecipients(directory([legacy, strict]), {
+    token: '&POOL/NEWS',
+    poolRoot: '&POOL',
+    maxRecipients: 2,
+    senderPubKey: legacy.publicKey,
+    senderAddress: legacy.address,
+    network: 'test',
+  });
+  assert.equal(result.recipientCount, 2);
+  assert.equal(result.recipientPubKeys.length, 2);
+  for (const bad of [
+    { ...directory([legacy]), truncated: true },
+    { ...directory([legacy]), stop_at: '&OTHER' },
+    directory([{ ...legacy, address: strict.address, publicKey: (await holder('legacy', '88'.repeat(32))).publicKey }]),
+  ])
     await assert.rejects(
-      decodeDepinRecipients(await holdersResponse(patch), args), re
+      lib.decodeDepinRecipients(bad, {
+        token: '&POOL/NEWS',
+        poolRoot: '&POOL',
+        maxRecipients: 20,
+        senderPubKey: legacy.publicKey,
+        senderAddress: legacy.address,
+        network: 'test',
+      }),
     );
-  }
-  // key must hash to its own address
-  await assert.rejects(
-    decodeDepinRecipients(await holdersResponse({
-      recipients: [{ address: await addressFor(B.pubCompressed), pubkey: C.pubCompressed }],
-      returned: 1
-    }), args),
-    /does not match its address/
-  );
-  // same holder in both forms collapses to one point
-  const dedup = await decodeDepinRecipients(await holdersResponse({
-    recipients: [
-      { address: await addressFor(B.pubCompressed), pubkey: B.pubCompressed },
-      { address: await addressFor(B.pubUncompressed), pubkey: B.pubUncompressed }
-    ],
-    returned: 2
-  }), args);
-  assert.equal(dedup.recipientCount, 2); // B (one point) + sender
-  // limit is on the final map, sender included
-  const exactFit = await decodeDepinRecipients(await holdersResponse({
-    recipients: [
-      { address: await addressFor(B.pubCompressed), pubkey: B.pubCompressed },
-      { address: await addressFor(C.pubUncompressed), pubkey: C.pubUncompressed },
-      { address: await addressFor(sender.pub), pubkey: sender.pub }
-    ],
-    returned: 3
-  }), args);
-  assert.equal(exactFit.recipientCount, 3);
-  assert.equal(exactFit.senderIncludedInHolders, true);
-  await assert.rejects(
-    decodeDepinRecipients(await holdersResponse({
-      recipients: [
-        { address: await addressFor(B.pubCompressed), pubkey: B.pubCompressed },
-        { address: await addressFor(C.pubUncompressed), pubkey: C.pubUncompressed },
-        { address: await addressFor(D.pubCompressed), pubkey: D.pubCompressed }
-      ],
-      returned: 3
-    }), args),
-    /sender included.*above the pool limit/s
-  );
 });
-
-test('resolveDepinRecipients parameter validation happens before any RPC', async () => {
-  const { rpc, calls } = mockRpc(() => { throw new Error('must not be called'); });
-  await assert.rejects(resolveDepinRecipients({ ...baseArgs(), rpc, token: '&OTHER/XYZ' }), /not under pool root/);
-  await assert.rejects(resolveDepinRecipients({ ...baseArgs(), rpc, maxRecipients: 0 }), /between 1 and 50/);
-  await assert.rejects(resolveDepinRecipients({ ...baseArgs(), rpc, maxRecipients: 51 }), /between 1 and 50/);
-  await assert.rejects(resolveDepinRecipients({ ...baseArgs(), rpc, senderPubKey: undefined }), /senderPubKey is required/);
-  await assert.rejects(resolveDepinRecipients({ ...baseArgs(), rpc, poolPublicKey: undefined }), /poolPublicKey/);
-  await assert.rejects(resolveDepinRecipients({ ...baseArgs() }), /rpc with a call/);
-  assert.equal(calls.length, 0);
+test('malformed input and missing capabilities fail before network access', async () => {
+  const identity = await holder(),
+    rpc = mockRpc(() => assert.fail('RPC was called'));
+  await assert.rejects(
+    lib.requestDepinChallenge({ rpc, context, identity: { address: identity.address }, token: '&POOL' }),
+    lib.DepinCapabilityError,
+  );
+  await assert.rejects(lib.receiveDepinMessages({ rpc, context, identity, token: '&POOL', challenge: CH, network: 'test', limit: 1001 }));
+  await assert.rejects(
+    lib.receiveDepinMessages({
+      rpc,
+      context,
+      identity,
+      token: '&POOL',
+      challenge: CH,
+      network: 'test',
+      cursor: {
+        version: 1,
+        stream_id: '55'.repeat(32),
+        after_seq: 9007199254740992,
+        scope: '&POOL',
+        address: identity.address,
+        from_timestamp: 0,
+      },
+    }),
+  );
+  await assert.rejects(lib.clearDepinMessages({ rpc, context, identity, scope: '&POOL', challenge: CH, mode: -1 }));
 });
-
-test('buildDepinMessageForPool resolves through the envelope and builds a decryptable message', async () => {
-  const body = await holdersResponse();
-  const { rpc } = mockRpc(() => plainReply('depingetancestorrecipients', '&POOL/NEWS', body));
-  const out = await buildDepinMessageForPool({
-    ...baseArgs(),
+test('explicit private selection works in a directory larger than the message recipient limit', async () => {
+  const identity = await holder(),
+    target = await holder('ecdsa', '88'.repeat(32)),
+    third = await holder('legacy', '99'.repeat(32));
+  const rpc = mockRpc((m, r) => reply(m, r, directory([identity, target, third])));
+  const params = {
     rpc,
-    senderAddress: await addressFor(sender.pub),
-    privateKey: sender.privHex,
-    message: 'pool build',
-    messageType: 'group',
-    timestamp: 1753900000
-  });
-  assert.equal(out.resolution.recipientCount, 3);
-  const parsed = await parseDepinMessage(out.hex);
-  assert.equal(parsed.token, '&POOL/NEWS');
-  assert.equal(
-    await decryptDepinReceiveEncryptedPayload(parsed.encryptedPayloadHex, C.privHex),
-    'pool build'
-  );
-});
-
-test('buildDepinMessageForPool uses an external signDigest exactly once', async () => {
-  const body = await holdersResponse();
-  const { rpc, calls } = mockRpc(() =>
-    plainReply('depingetancestorrecipients', '&POOL/NEWS', body)
-  );
-  const software = await createSoftwareIdentity({
-    privateKey: sender.privHex, network: 'test'
-  });
-  const digests = [];
-  const identity = {
-    ...software,
-    signDigest: (digest) => {
-      digests.push(digest.slice());
-      return software.signDigest(digest);
-    }
-  };
-  const out = await buildDepinMessageForPool({
-    rpc,
-    token: '&POOL/NEWS', poolRoot: '&POOL', maxRecipients: 3,
-    poolPublicKey: POOL.pubCompressed, network: 'test', identity,
-    message: 'hardware build', messageType: 'group', timestamp: 1753900001
-  });
-  assert.equal(calls.length, 1);
-  assert.equal(digests.length, 1);
-  assert.equal(digests[0].length, 32);
-  const parsed = await parseDepinMessage(out.hex);
-  assert.equal(parsed.hashBytes, bytesToHex(digests[0]));
-  assert.equal(
-    await decryptDepinReceiveEncryptedPayload(parsed.encryptedPayloadHex, C.privHex),
-    'hardware build'
-  );
-});
-
-test('identity publishing rejects missing capability or a wrong signature', async () => {
-  const body = await holdersResponse();
-  const noRpc = mockRpc(() => { throw new Error('must not be called'); });
-  await assert.rejects(buildDepinMessageForPool({
-    rpc: noRpc.rpc,
-    token: '&POOL/NEWS', poolRoot: '&POOL', maxRecipients: 3,
-    poolPublicKey: POOL.pubCompressed, network: 'test',
-    identity: { address: await addressFor(sender.pub), publicKey: sender.pub },
-    message: 'x', messageType: 'group', timestamp: 1753900001
-  }), DepinCapabilityError);
-  assert.equal(noRpc.calls.length, 0);
-
-  const wrongSigner = await createSoftwareIdentity({
-    privateKey: B.privHex, network: 'test'
-  });
-  const senderIdentity = await createSoftwareIdentity({
-    privateKey: sender.privHex, network: 'test'
-  });
-  await assert.rejects(buildDepinMessageForPool({
-    rpc: noRpc.rpc,
-    token: '&POOL/NEWS', poolRoot: '&POOL', maxRecipients: 3,
-    poolPublicKey: POOL.pubCompressed, network: 'test',
-    identity: { ...senderIdentity, address: await addressFor(B.pubCompressed) },
-    message: 'x', messageType: 'group', timestamp: 1753900001
-  }), /does not correspond/);
-  assert.equal(noRpc.calls.length, 0);
-
-  const withRpc = mockRpc(() =>
-    plainReply('depingetancestorrecipients', '&POOL/NEWS', body)
-  );
-  await assert.rejects(buildDepinMessageForPool({
-    rpc: withRpc.rpc,
-    token: '&POOL/NEWS', poolRoot: '&POOL', maxRecipients: 3,
-    poolPublicKey: POOL.pubCompressed, network: 'test',
-    identity: { ...senderIdentity, signDigest: wrongSigner.signDigest },
-    message: 'x', messageType: 'group', timestamp: 1753900001
-  }), /does not verify/);
-});
-
-// ---------------------------------------------------------------------------
-// Pool info (§6.4)
-// ---------------------------------------------------------------------------
-
-function poolInfoBody() {
-  return {
-    enabled: true, token: '&POOL', cipher: 'AES-256-GCM', maxrecipients: 20,
-    maxmessagesize: 1024, messageexpiryhours: 168, maxpoolsizemb: 100,
-    messages: 0, memoryusage: 0, protocol: 2,
-    depinpoolpkey: POOL.pubCompressed
-  };
-}
-
-test('getDepinPoolInfo: TOFU yields the observed pin; pinned enforces it', async () => {
-  const { rpc } = mockRpc(() => plainReply('depingetmsginfo', '&POOL', poolInfoBody()));
-  const serviceId = 'https://pool.example/rpc';
-  const tofu = await getDepinPoolInfo({
-    rpc, serviceId, trust: { mode: 'tofu' }, network: 'test'
-  });
-  assert.deepEqual(tofu.pin, { serviceId, poolRoot: '&POOL', poolPublicKey: POOL.pubCompressed });
-  assert.equal(tofu.trust, 'tofu');
-
-  const pinned = await getDepinPoolInfo({
-    rpc, serviceId, network: 'test',
-    trust: { mode: 'pinned', pin: tofu.pin }
-  });
-  assert.equal(pinned.info.maxrecipients, 20);
-
-  // A different pool key under a pinned trust: authentication error.
-  const otherKey = keypair('99'.repeat(32));
-  await assert.rejects(
-    getDepinPoolInfo({
-      rpc, serviceId, network: 'test',
-      trust: { mode: 'pinned', pin: { ...tofu.pin, poolPublicKey: otherKey.pubCompressed } }
-    }),
-    DepinReplyAuthenticationError
-  );
-});
-
-test('getDepinPoolInfo: protocol !== 2 is refused after authentication', async () => {
-  const { rpc } = mockRpc(() =>
-    plainReply('depingetmsginfo', '&POOL', { ...poolInfoBody(), protocol: 1 })
-  );
-  await assert.rejects(
-    getDepinPoolInfo({
-      rpc, serviceId: 'svc', trust: { mode: 'tofu' }, network: 'test'
-    }),
-    /requires protocol 2/
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Challenge (§7.1) + timestamps (§3.6)
-// ---------------------------------------------------------------------------
-
-test('requestDepinChallenge signs DEPIN-REQ, verifies and decrypts the reply', async () => {
-  const identity = await holderIdentity();
-  const { rpc, calls } = mockRpc(async (method, params) => {
-    assert.equal(method, 'depinchallenge');
-    const [token, address, t, sig, type] = params;
-    assert.equal(token, '&POOL/NEWS');
-    assert.equal(address, identity.address);
-    assert.equal(type, 'receive');
-    // Server-side check: the signed request recovers the holder key.
-    const preimage = buildDepinRequestPreimage({ type, token, address, timestampMs: t });
-    assert.equal(verifyRecoverableMessage(preimage, sig, identity.publicKey), true);
-    return boundReply('depinchallenge', token, address, '',
-      { challenge: CH, expires_in: 30, type: 'receive' }, identity.publicKey);
-  });
-
-  const res = await requestDepinChallenge({
-    rpc, identity, token: '&POOL/NEWS', poolPublicKey: POOL.pubCompressed
-  });
-  assert.equal(res.challenge, CH);
-  assert.equal(res.expiresIn, 30);
-  assert.equal(calls.length, 1);
-});
-
-test('timestamps are strictly monotonic per address, even on the same tick', async () => {
-  const identity = await holderIdentity();
-  const seen = [];
-  const { rpc } = mockRpc(async (method, params) => {
-    seen.push(params[2]);
-    return boundReply('depinchallenge', '&POOL/NEWS', identity.address, '',
-      { challenge: CH, expires_in: 30, type: 'receive' }, identity.publicKey);
-  });
-  const frozenClock = () => 1730000000000; // same tick every call
-  await Promise.all([
-    requestDepinChallenge({ rpc, identity, token: '&POOL/NEWS', poolPublicKey: POOL.pubCompressed, clock: frozenClock }),
-    requestDepinChallenge({ rpc, identity, token: '&POOL/NEWS', poolPublicKey: POOL.pubCompressed, clock: frozenClock }),
-    requestDepinChallenge({ rpc, identity, token: '&POOL/NEWS', poolPublicKey: POOL.pubCompressed, clock: frozenClock })
-  ]);
-  assert.equal(new Set(seen).size, 3, 'concurrent requests reused a timestamp');
-  assert.deepEqual([...seen].sort((a, b) => a - b), seen);
-});
-
-test('a tampered challenge reply never reaches openReply', async () => {
-  const identity = await holderIdentity();
-  let opened = 0;
-  const spied = {
-    ...identity,
-    openReply: async (hex) => { opened += 1; return identity.openReply(hex); }
-  };
-  const { rpc } = mockRpc(async (method, params) => {
-    const reply = await boundReply('depinchallenge', params[0], params[1], '',
-      { challenge: CH, expires_in: 30, type: 'receive' }, identity.publicKey);
-    const bytes = hexToBytes(reply.encrypted);
-    bytes[bytes.length - 1] ^= 0x01;
-    reply.encrypted = bytesToHex(bytes); // poolsig no longer covers it
-    return reply;
-  });
-  await assert.rejects(
-    requestDepinChallenge({
-      rpc, identity: spied, token: '&POOL/NEWS', poolPublicKey: POOL.pubCompressed
-    }),
-    DepinReplyAuthenticationError
-  );
-  assert.equal(opened, 0, 'openReply ran before authentication');
-});
-
-test('capability failures happen before any RPC', async () => {
-  const identity = await holderIdentity();
-  const { rpc, calls } = mockRpc(() => { throw new Error('must not be called'); });
-  const noSign = { ...identity };
-  delete noSign.signMessage;
-  await assert.rejects(
-    requestDepinChallenge({ rpc, identity: noSign, token: '&POOL/NEWS', poolPublicKey: POOL.pubCompressed }),
-    DepinCapabilityError
-  );
-  const noOpen = { ...identity };
-  delete noOpen.openReply;
-  await assert.rejects(
-    receiveDepinMessages({
-      rpc, identity: noOpen, token: '&POOL/NEWS', challenge: CH,
-      poolPublicKey: POOL.pubCompressed, network: 'test'
-    }),
-    DepinCapabilityError
-  );
-  assert.equal(calls.length, 0);
-});
-
-// ---------------------------------------------------------------------------
-// Receive (§7.2, §7.3) + parameter normalization (§3.4)
-// ---------------------------------------------------------------------------
-
-test('receiveDepinMessages: empty page, chaining, exact params with null filling', async () => {
-  const identity = await holderIdentity();
-  const { rpc, calls } = mockRpc(async (method, params) => {
-    assert.equal(method, 'depinreceivemsg');
-    const [token, address, challenge, sig] = params;
-    const preimage = buildDepinGetPreimage({ token, address, challenge });
-    assert.equal(verifyRecoverableMessage(preimage, sig, identity.publicKey), true);
-    return boundReply('depinreceivemsg', token, address, challenge,
-      { messages: [], has_more: false, next_challenge: CH2, next_expires_in: 300 },
-      identity.publicKey);
-  });
-
-  // limit only → timestamp and afterHash filled with null
-  const res = await receiveDepinMessages({
-    rpc, identity, token: '&POOL/NEWS', challenge: CH,
-    poolPublicKey: POOL.pubCompressed, network: 'test', limit: 5
-  });
-  assert.deepEqual(calls[0].params.slice(4), [null, null, 5]);
-  assert.equal(res.messages.length, 0);
-  assert.equal(res.hasMore, false);
-  assert.equal(res.nextChallenge, CH2);
-  assert.equal(res.nextExpiresIn, 300);
-
-  // afterHash only → single null before it, no trailing slot
-  await receiveDepinMessages({
-    rpc, identity, token: '&POOL/NEWS', challenge: CH,
-    poolPublicKey: POOL.pubCompressed, network: 'test', afterHash: 'ee'.repeat(32)
-  });
-  assert.deepEqual(calls[1].params.slice(4), [null, 'ee'.repeat(32)]);
-
-  // no optionals → no tail at all
-  await receiveDepinMessages({
-    rpc, identity, token: '&POOL/NEWS', challenge: CH,
-    poolPublicKey: POOL.pubCompressed, network: 'test'
-  });
-  assert.equal(calls[2].params.length, 4);
-});
-
-test('receiveDepinMessages: a real message decrypts through the identity opener', async () => {
-  const identity = await holderIdentity();
-  // The sender publishes to the holder: build a real CDepinMessage.
-  const built = await buildDepinMessage({
+    context,
+    identity,
     token: '&POOL/NEWS',
-    senderAddress: await addressFor(sender.pub),
-    senderPubKey: sender.pub,
-    privateKey: sender.privHex,
-    message: 'hola holder',
-    messageType: 'group',
-    recipientPubKeys: [identity.publicKey, sender.pub],
-    timestamp: 1753900000,
-    network: 'test'
-  });
-  const parsed = await parseDepinMessage(built.hex);
-  const entry = {
-    hash: parsed.hash,
-    token: parsed.token,
-    sender: parsed.senderAddress,
-    timestamp: parsed.timestamp,
-    message_type: parsed.messageType,
-    encrypted_payload_hex: parsed.encryptedPayloadHex,
-    signature_hex: parsed.signatureHex
+    poolRoot: '&POOL',
+    maxRecipients: 2,
+    network: 'test',
+    message: 'private',
+    timestamp: 1700000000,
+    messageType: 'private',
   };
-  const { rpc } = mockRpc((method, params) =>
-    boundReply('depinreceivemsg', params[0], params[1], params[2],
-      { messages: [entry], has_more: false, next_challenge: CH2, next_expires_in: 300 },
-      identity.publicKey)
-  );
-  const res = await receiveDepinMessages({
-    rpc, identity, token: '&POOL/NEWS', challenge: CH,
-    poolPublicKey: POOL.pubCompressed, network: 'test',
-    resolveSenderPubKey: async () => sender.pub
-  });
-  assert.equal(res.messages.length, 1);
-  assert.equal(res.messages[0].ok, true);
-  assert.equal(res.messages[0].plaintext, 'hola holder');
-
-  // Core can sign has_more=false for a full page that has a successor.
-  const fullPage = await receiveDepinMessages({
-    rpc, identity, token: '&POOL/NEWS', challenge: CH,
-    poolPublicKey: POOL.pubCompressed, network: 'test', limit: 1,
-    resolveSenderPubKey: async () => sender.pub
-  });
-  assert.equal(fullPage.raw.has_more, false);
-  assert.equal(fullPage.hasMore, true);
-  assert.equal(fullPage.messages[0].hash, parsed.hash);
-});
-
-test('receiveDepinMessages: input validation rejects before the RPC', async () => {
-  const identity = await holderIdentity();
-  const { rpc, calls } = mockRpc(() => { throw new Error('must not be called'); });
-  const base = {
-    rpc, identity, token: '&POOL/NEWS', challenge: CH,
-    poolPublicKey: POOL.pubCompressed, network: 'test'
-  };
-  await assert.rejects(receiveDepinMessages({ ...base, challenge: 'nope' }), /challenge must be/);
-  await assert.rejects(receiveDepinMessages({ ...base, limit: 1001 }), /between 0 and 1000/);
-  await assert.rejects(receiveDepinMessages({ ...base, limit: -1 }), /between 0 and 1000/);
-  await assert.rejects(receiveDepinMessages({ ...base, afterHash: 'zz' }), /afterHash/);
-  await assert.rejects(receiveDepinMessages({ ...base, timestamp: -5 }), /timestamp/);
-  assert.equal(calls.length, 0);
-});
-
-// ---------------------------------------------------------------------------
-// Sections (§8.1/§8.2)
-// ---------------------------------------------------------------------------
-
-test('listDepinSectionsPublic verifies the root-bound plain reply', async () => {
-  const sections = [{ name: '&POOL', label: '', depth: 0 }, { name: '&POOL/NEWS', label: 'News', depth: 1 }];
-  const { rpc, calls } = mockRpc(() => plainReply('depinlistsections', '&POOL', { sections }));
-  const res = await listDepinSectionsPublic({
-    rpc, poolRoot: '&POOL', poolPublicKey: POOL.pubCompressed
-  });
-  assert.deepEqual(calls[0], { method: 'depinlistsections', params: [] });
-  assert.deepEqual(res.sections, sections);
-});
-
-test('listDepinSectionsPrivate signs DEPIN-GET over the scope and chains', async () => {
-  const identity = await holderIdentity();
-  const sections = [{ name: '&POOL/NEWS', label: 'News', depth: 1, access: 'holder' }];
-  const { rpc, calls } = mockRpc(async (method, params) => {
-    assert.equal(method, 'depinlistsections');
-    const [address, scope, challenge, sig] = params;
-    const preimage = buildDepinGetPreimage({ token: scope, address, challenge });
-    assert.equal(verifyRecoverableMessage(preimage, sig, identity.publicKey), true);
-    return boundReply('depinlistsections', scope, address, challenge,
-      { sections, next_challenge: CH2, next_expires_in: 300 }, identity.publicKey);
-  });
-  const res = await listDepinSectionsPrivate({
-    rpc, identity, scope: '&POOL/NEWS', challenge: CH, poolPublicKey: POOL.pubCompressed
-  });
-  assert.deepEqual(calls[0].params[0], identity.address);
-  assert.deepEqual(res.sections, sections);
-  assert.equal(res.nextChallenge, CH2);
-});
-
-// ---------------------------------------------------------------------------
-// Clear (§8.4)
-// ---------------------------------------------------------------------------
-
-test("clearDepinMessages: scope '' signs and verifies with the pool root", async () => {
-  const identity = await holderIdentity();
-  const { rpc, calls } = mockRpc(async (method, params) => {
-    assert.equal(method, 'depinclearmsg');
-    const [scope, address, challenge, sig, mode] = params;
-    assert.equal(scope, ''); // the RPC still receives ''
-    assert.equal(mode, 'all');
-    // ...but the signature covers the resolved root.
-    const preimage = buildDepinClearPreimage({ scope: '&POOL', address, challenge });
-    assert.equal(verifyRecoverableMessage(preimage, sig, identity.publicKey), true);
-    return boundReply('depinclearmsg', '&POOL', address, challenge,
-      { removed: 7, remaining: 0 }, identity.publicKey);
-  });
-  const res = await clearDepinMessages({
-    rpc, identity, scope: '', poolRoot: '&POOL', challenge: CH,
-    poolPublicKey: POOL.pubCompressed, mode: 'all'
-  });
-  assert.equal(res.removed, 7);
-  assert.equal(calls.length, 1);
-});
-
-test('clearDepinMessages: mode validation and omitted mode', async () => {
-  const identity = await holderIdentity();
-  const { rpc, calls } = mockRpc((method, params) =>
-    boundReply('depinclearmsg', params[0], params[1], params[2],
-      { removed: 0, remaining: 3 }, identity.publicKey)
-  );
-  await clearDepinMessages({
-    rpc, identity, scope: '&POOL/NEWS', poolRoot: '&POOL', challenge: CH,
-    poolPublicKey: POOL.pubCompressed
-  });
-  assert.equal(calls[0].params.length, 4); // no mode slot when omitted
-  await assert.rejects(
-    clearDepinMessages({
-      rpc, identity, scope: '&POOL/NEWS', poolRoot: '&POOL', challenge: CH,
-      poolPublicKey: POOL.pubCompressed, mode: -1
-    }),
-    /mode must be/
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Submit (§8.3)
-// ---------------------------------------------------------------------------
-
-test('submitDepinMessage wraps for the pool key and verifies the bound confirmation', async () => {
-  const senderIdentity = await createSoftwareIdentity({ privateKey: sender.privHex, network: 'test' });
-  const built = await buildDepinMessage({
-    token: '&POOL/NEWS',
-    senderAddress: senderIdentity.address,
-    senderPubKey: senderIdentity.publicKey,
-    privateKey: sender.privHex,
-    message: 'publicame',
-    messageType: 'group',
-    recipientPubKeys: [B.pubCompressed, senderIdentity.publicKey],
-    timestamp: 1753900000,
-    network: 'test'
-  });
-  const HASH = 'ff'.repeat(32);
-  const { rpc, calls } = mockRpc(async (method, params) => {
-    assert.equal(method, 'depinsubmitmsg');
-    assert.equal(params.length, 1);
-    const { sender: senderAddr, encrypted } = params[0];
-    assert.equal(senderAddr, senderIdentity.address);
-    // The "node" opens the envelope with the pool key and finds the hex.
-    const envelope = deserializeEciesMessage(hexToBytes(encrypted));
-    const opened = await eciesDecrypt(envelope, POOL.priv);
-    assert.equal(new TextDecoder().decode(opened), built.hex);
-    return boundReply('depinsubmitmsg', '&POOL/NEWS', senderAddr, '',
-      { result: 'success', hash: HASH, timestamp: 1753900001 }, senderIdentity.publicKey);
-  });
-  const res = await submitDepinMessage({
-    rpc, identity: senderIdentity, messageHex: built.hex,
-    poolPublicKey: POOL.pubCompressed
-  });
-  assert.equal(res.hash, HASH);
-  assert.equal(calls.length, 1);
-});
-
-test('submitDepinMessage refuses a message whose sender is not the identity', async () => {
-  const otherIdentity = await createSoftwareIdentity({ privateKey: HOLDER.privHex, network: 'test' });
-  const built = await buildDepinMessage({
-    token: '&POOL/NEWS',
-    senderAddress: await addressFor(sender.pub),
-    senderPubKey: sender.pub,
-    privateKey: sender.privHex,
-    message: 'x',
-    messageType: 'group',
-    recipientPubKeys: [B.pubCompressed],
-    timestamp: 1753900000,
-    network: 'test'
-  });
-  const { rpc, calls } = mockRpc(() => { throw new Error('must not be called'); });
-  await assert.rejects(
-    submitDepinMessage({
-      rpc, identity: otherIdentity, messageHex: built.hex,
-      poolPublicKey: POOL.pubCompressed
-    }),
-    /does not match the identity address/
-  );
-  assert.equal(calls.length, 0);
-});
-
-// ---------------------------------------------------------------------------
-// No implicit retries
-// ---------------------------------------------------------------------------
-
-test('an RPC failure propagates once — signed requests are never retried', async () => {
-  const identity = await holderIdentity();
-  const boom = Object.assign(new Error('Rate limited'), { code: -1 });
-  const { rpc, calls } = mockRpc(() => { throw boom; });
-  await assert.rejects(
-    requestDepinChallenge({
-      rpc, identity, token: '&POOL/NEWS', poolPublicKey: POOL.pubCompressed
-    }),
-    (e) => e === boom
-  );
-  assert.equal(calls.length, 1);
+  const built = await lib.buildDepinMessageForPool({ ...params, selectedAddresses: [target.address] });
+  assert.equal(built.recipientCount, 2);
+  assert.equal(rpc.calls[0].params[0].args.max_results, 10000);
+  const encrypted = lib.deserializeEciesMessage(lib.hexToBytes((await lib.parseDepinMessage(built.hex)).encryptedPayloadHex));
+  assert.equal(encrypted.recipientKeys.size, 2);
+  assert.equal(await lib.eciesDecrypt(encrypted, lib.hexToBytes('99'.repeat(32))), null);
+  await assert.rejects(lib.buildDepinMessageForPool(params), /recipient map/);
+  await assert.rejects(lib.buildDepinMessageForPool({ ...params, selectedAddresses: ['not-listed'] }), /not an eligible/);
 });

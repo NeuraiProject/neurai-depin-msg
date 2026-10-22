@@ -1,433 +1,188 @@
-/**
- * DePIN protocol-2 reply envelopes: structural validation, `poolsig`
- * verification and authenticated opening (spec §6.2–§6.4).
- *
- * Every DePIN reply is `{ body, poolsig }` (plain) or `{ encrypted, poolsig }`
- * (bound to an address). The pool signs
- *
- *   DEPIN-RESP|method|token|address|challenge|sha256hex(replyHex)
- *
- * over the ASCII hex string exactly as received — so this module hashes the
- * string it was given and never a re-serialization (§13.7 N2).
- *
- * Processing order is an API guarantee (plan v2 §1.4): shape/limits → pin →
- * poolsig → decrypt → parse. Decoding helpers only accept values branded by
- * the verification step; the brand cannot be fabricated from outside this
- * module, so there is no convenient unauthenticated path.
- */
-
-import { sha256 as nobleSha256 } from '@noble/hashes/sha256';
+/** Authenticated RPC 5 replies. Shape -> request/identity binding -> signature -> opening. */
+import { sha256 } from '@noble/hashes/sha256';
+import { parse } from 'lossless-json';
+import { assertNoDuplicateJsonKeys } from './json.js';
 import { bytesToHex, hexToBytes } from './bytes.js';
-import { hash160 } from './hash.js';
 import { parsePublicKey, normalizePrivateKeyTo32Bytes } from './keys.js';
-import { decodeP2PKHAddress } from './address.js';
-import { validateDepinSectionToken } from './scope.js';
+import { pubKeyMatchesAddress, normalizeNetwork, decodeDepinAddress } from './address.js';
 import { deserializeEciesMessage, eciesDecrypt } from './ecies.js';
-import {
-  base64Decode,
-  recoverPublicKeyFromMessage
-} from './signmessage.js';
-import {
-  DepinProtocolError,
-  DepinReplyAuthenticationError,
-  DepinReplyDecryptionError,
-  PoolPinMismatchError
-} from './errors.js';
+import { base64Decode, recoverPublicKeyFromMessage } from './signmessage.js';
+import { validateDepinSectionToken } from './scope.js';
+import { depinRequestHash, buildDepinRpcResponsePreimage } from './rpc-codec.js';
+import { DepinProtocolError, DepinReplyAuthenticationError, DepinReplyDecryptionError, PoolPinMismatchError } from './errors.js';
 
-// Resource limits, enforced before any expensive work (plan v2 §2.5/§5).
-// A reply carries at most one page of messages (limit ≤ 1000, message size
-// ≤ 10 240 bytes, ≤ 50 recipient entries each) — 32 MiB of hex is far above
-// any legitimate reply while still bounding allocations.
-const MAX_REPLY_HEX_CHARS = 32 * 1024 * 1024;
-const MAX_DECODED_JSON_BYTES = 16 * 1024 * 1024;
-
-// Runtime capability, not a structural/type-only brand. A WeakSet cannot be
-// recovered from a genuine object and copied onto attacker-controlled data.
+const MAX_DECODED_JSON_BYTES = 4 * 1024 * 1024;
+const MAX_REPLY_HEX_CHARS = 2 * (82 + MAX_DECODED_JSON_BYTES + 94 * 50);
 const VERIFIED_REPLIES = new WeakSet();
-
 function isVerifiedDepinReply(value) {
-  return Boolean(value) && typeof value === 'object' && VERIFIED_REPLIES.has(value);
+  return !!value && VERIFIED_REPLIES.has(value);
 }
-
-function sha256HexOfAscii(str) {
-  return bytesToHex(nobleSha256(new TextEncoder().encode(str)));
+const MAIN_GENESIS = '00000044d33c0c0ba019be5c0249730424a69cb4c222153322f68c6104484806';
+const TEST_GENESIS = '0000008b384aeffecdab182575dc4e86c9f07f90318c65088532660ed9a8a021';
+function expectedDepinNetwork(network, expectedNetworkHash) {
+  if (expectedNetworkHash !== undefined) {
+    if (!/^[0-9a-f]{64}$/.test(expectedNetworkHash)) throw new DepinProtocolError('Invalid expected genesis');
+    return expectedNetworkHash;
+  }
+  if (network === 'regtest') throw new DepinProtocolError('regtest requires expectedNetworkHash');
+  return normalizeNetwork(network) === 'mainnet' ? MAIN_GENESIS : TEST_GENESIS;
 }
-
-function assertPreimageComponent(value, name) {
-  if (typeof value !== 'string') {
-    throw new DepinProtocolError(name + ' must be a string');
-  }
-  if (value.includes('|')) {
-    throw new DepinProtocolError(name + " must not contain '|'");
-  }
-  return value;
+function poolKeyFingerprint(pubKey) {
+  const hash = bytesToHex(sha256(hexToBytes(parsePublicKey(pubKey).pointId)));
+  return hash.slice(0, 16).replace(/(.{4})(?=.)/g, '$1 ');
 }
-
-/**
- * Builds the reply preimage over the reply hex EXACTLY as received.
- * `token`, `address` and `challenge` default to '' like the node does for
- * methods without that argument.
- */
-function buildDepinReplyPreimage({ method, token = '', address = '', challenge = '', replyHex }) {
-  assertPreimageComponent(method, 'method');
-  if (!/^[a-z0-9]+$/.test(method)) {
-    throw new DepinProtocolError('method must be a lowercase RPC name');
-  }
-  assertPreimageComponent(token, 'token');
-  assertPreimageComponent(address, 'address');
-  assertPreimageComponent(challenge, 'challenge');
-  if (typeof replyHex !== 'string' || replyHex.length === 0) {
-    throw new DepinProtocolError('replyHex is required');
-  }
-  return (
-    'DEPIN-RESP|' + method + '|' + token + '|' + address + '|' + challenge +
-    '|' + sha256HexOfAscii(replyHex)
-  );
+function buildDepinReplyPreimage({ method, reply, request }) {
+  return buildDepinRpcResponsePreimage({ method, reply, requestHash: depinRequestHash(method, request) });
 }
-
-function validateReplyShape(reply) {
-  if (!reply || typeof reply !== 'object' || Array.isArray(reply)) {
-    throw new DepinProtocolError('DePIN reply must be an object');
+function verifyDepinReply({ reply, method, request, poolPublicKey, expectedNetworkHash }) {
+  if (!reply || typeof reply !== 'object' || Array.isArray(reply)) throw new DepinProtocolError('Invalid reply object');
+  const field = reply.body_kind === 1 ? 'encrypted' : 'body';
+  const fields = [
+    'protocol',
+    'network',
+    'pool_pubkey',
+    'pool_root',
+    'instance_id',
+    'membership_revision',
+    'membership_height',
+    'membership_blockhash',
+    'request_hash',
+    'body_kind',
+    field,
+    'poolsig',
+  ];
+  if (Object.keys(reply).length !== fields.length || fields.some((k) => !Object.prototype.hasOwnProperty.call(reply, k)))
+    throw new DepinProtocolError('Invalid RPC 5 reply fields');
+  const requestHash = depinRequestHash(method, request);
+  if (reply.request_hash !== requestHash) throw new DepinReplyAuthenticationError('Reply request hash mismatch');
+  const expectedKey = parsePublicKey(poolPublicKey);
+  if (expectedKey.bytes.length !== 33 || reply.pool_pubkey !== bytesToHex(expectedKey.bytes))
+    throw new PoolPinMismatchError('Reply poolPublicKey mismatch');
+  const bootstrap = method === 'depingetmsginfo';
+  const bound =
+    (!bootstrap && ['depinchallenge', 'depinreceivemsg', 'depinreceiveseq', 'depinclearmsg', 'depinsubmitmsg'].includes(method)) ||
+    (method === 'depinlistsections' && !!request.address);
+  if (reply.body_kind !== (bound ? 1 : 0)) throw new DepinReplyAuthenticationError('Reply confidentiality mismatch');
+  if (bootstrap) {
+    if (!expectedNetworkHash || reply.network !== expectedNetworkHash) throw new PoolPinMismatchError('Reply genesis/network mismatch');
+  } else {
+    for (const key of ['network', 'pool_pubkey', 'pool_root', 'instance_id'])
+      if (reply[key] !== request[key]) throw new PoolPinMismatchError('Reply service identity mismatch: ' + key);
   }
-  const hasBody = typeof reply.body === 'string';
-  const hasEncrypted = typeof reply.encrypted === 'string';
-  if (hasBody === hasEncrypted) {
-    throw new DepinProtocolError(
-      "DePIN reply must carry exactly one of 'body' or 'encrypted'"
-    );
-  }
-  if (typeof reply.poolsig !== 'string' || reply.poolsig.length === 0) {
-    throw new DepinProtocolError('DePIN reply is missing poolsig');
-  }
-  // Compact signatures are always 65 bytes -> 88 canonical Base64 chars.
-  // Check before decoding so an untrusted RPC cannot trigger a large
-  // allocation through a deliberately oversized poolsig.
-  if (reply.poolsig.length !== 88) {
-    throw new DepinProtocolError('poolsig must be exactly 88 Base64 characters');
-  }
-  let compactSignature;
-  try {
-    compactSignature = base64Decode(reply.poolsig);
-  } catch (e) {
-    throw new DepinProtocolError('poolsig must be canonical Base64', e);
-  }
-  if (compactSignature.length !== 65) {
-    throw new DepinProtocolError('poolsig must decode to exactly 65 bytes');
-  }
-  // Protocol 2 only uses compressed signmessage keys (headers 31..34).
-  if (compactSignature[0] < 31 || compactSignature[0] > 34) {
-    throw new DepinProtocolError('poolsig must declare a compressed key (header 31..34)');
-  }
-  const replyHex = hasBody ? reply.body : reply.encrypted;
-  if (replyHex.length === 0 || replyHex.length > MAX_REPLY_HEX_CHARS) {
-    throw new DepinProtocolError('DePIN reply hex is empty or exceeds the size limit');
-  }
-  if (replyHex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(replyHex)) {
-    throw new DepinProtocolError('DePIN reply hex must be canonical lowercase hex');
-  }
-  return { kind: hasBody ? 'plain' : 'bound', replyHex };
-}
-
-/**
- * Verifies a DePIN reply against the pinned pool public key. Returns a
- * branded VerifiedReply `{ kind, replyHex, method, token, address,
- * challenge, poolPublicKey }`; throws DepinReplyAuthenticationError when the
- * signature does not recover to the expected key.
- */
-function verifyDepinReply({ reply, method, token = '', address = '', challenge = '', poolPublicKey }) {
-  const { kind, replyHex } = validateReplyShape(reply);
-  if (!poolPublicKey) {
-    throw new DepinProtocolError('poolPublicKey is required to verify a DePIN reply');
-  }
-  const expected = parsePublicKey(poolPublicKey);
-  if (expected.bytes.length !== 33) {
-    throw new DepinProtocolError('poolPublicKey must be a compressed 33-byte SEC1 key');
-  }
-  const preimage = buildDepinReplyPreimage({ method, token, address, challenge, replyHex });
-
+  if (typeof reply.poolsig !== 'string' || reply.poolsig.length !== 88) throw new DepinProtocolError('Invalid poolsig length');
+  const compact = base64Decode(reply.poolsig);
+  if (compact.length !== 65 || compact[0] < 31 || compact[0] > 34)
+    throw new DepinProtocolError('Pool signature requires a compressed compact key');
+  const preimage = buildDepinReplyPreimage({ method, reply, request });
   let recovered;
   try {
     recovered = recoverPublicKeyFromMessage(preimage, reply.poolsig);
-  } catch (e) {
-    throw new DepinReplyAuthenticationError(
-      'poolsig is malformed or unrecoverable for ' + method, e
-    );
+  } catch (cause) {
+    throw new DepinReplyAuthenticationError('Invalid pool signature', cause);
   }
-  if (parsePublicKey(recovered).pointId !== expected.pointId) {
-    throw new DepinReplyAuthenticationError(
-      'poolsig for ' + method + ' does not verify against the pinned pool key'
-    );
-  }
-
-  const verifiedReply = {
-    kind,
-    replyHex,
+  if (recovered !== reply.pool_pubkey) throw new DepinReplyAuthenticationError('Pool signature does not verify');
+  const context = Object.freeze(
+    Object.fromEntries(
+      ['network', 'pool_pubkey', 'pool_root', 'instance_id', 'membership_revision', 'membership_height', 'membership_blockhash'].map(
+        (k) => [k, reply[k]],
+      ),
+    ),
+  );
+  const verified = Object.freeze({
+    kind: bound ? 'bound' : 'plain',
+    replyHex: reply[field],
     method,
-    token,
-    address,
-    challenge,
-    poolPublicKey: expected.pointId
-  };
-  VERIFIED_REPLIES.add(verifiedReply);
-  return Object.freeze(verifiedReply);
+    address: request.address ?? '',
+    poolPublicKey: reply.pool_pubkey,
+    context,
+  });
+  VERIFIED_REPLIES.add(verified);
+  return verified;
 }
-
 function parseJsonBytes(bytes, context) {
-  if (bytes.length > MAX_DECODED_JSON_BYTES) {
-    throw new DepinProtocolError(context + ': decoded JSON exceeds the size limit');
-  }
-  let text;
+  if (bytes.length > MAX_DECODED_JSON_BYTES) throw new DepinProtocolError('Decoded JSON exceeds reply budget');
   try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch (e) {
-    throw new DepinProtocolError(context + ': decoded bytes are not valid UTF-8', e);
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    // Cursor integers must remain exact across decode, storage and the next signature.
+    assertNoDuplicateJsonKeys(text);
+    const value = parse(text, null, (s) => (/^-?\d+$/.test(s) && !Number.isSafeInteger(Number(s)) ? BigInt(s) : Number(s)));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Reply JSON must be an object');
+    return value;
+  } catch (cause) {
+    throw new DepinProtocolError(context + ': invalid JSON/UTF-8', cause);
   }
-  let value;
+}
+function decodePlainReply(verified) {
+  if (!isVerifiedDepinReply(verified) || verified.kind !== 'plain') throw new DepinProtocolError('A verified plain reply is required');
+  return parseJsonBytes(hexToBytes(verified.replyHex), verified.method);
+}
+async function openBoundReply(verified, opener) {
+  if (!isVerifiedDepinReply(verified) || verified.kind !== 'bound') throw new DepinProtocolError('A verified bound reply is required');
+  const message = deserializeEciesMessage(hexToBytes(verified.replyHex));
+  // Replies are addressed to exactly this identity, including its address family.
+  const recipient = await decodeDepinAddress(verified.address);
+  if (message.recipientKeys.size !== 1 || !message.recipientKeys.has(recipient.recipientId))
+    throw new DepinReplyDecryptionError('Reply recipient identity mismatch');
+  let bytes;
   try {
-    value = JSON.parse(text);
-  } catch (e) {
-    throw new DepinProtocolError(context + ': decoded text is not valid JSON', e);
+    bytes =
+      typeof opener === 'function'
+        ? await opener(verified.replyHex)
+        : await eciesDecrypt(message, await normalizePrivateKeyTo32Bytes(opener), verified.address);
+    if (typeof bytes === 'string') bytes = new TextEncoder().encode(bytes);
+    if (!(bytes instanceof Uint8Array)) throw new Error('Opener did not return plaintext bytes');
+  } catch (cause) {
+    throw new DepinReplyDecryptionError('Could not open authenticated reply', cause);
   }
-  if (!value || typeof value !== 'object') {
-    throw new DepinProtocolError(context + ': decoded JSON is not an object');
-  }
-  return value;
+  return parseJsonBytes(bytes, verified.method);
 }
-
-/**
- * Decodes the JSON of a verified PLAIN reply.
- */
-function decodePlainReply(verifiedReply) {
-  if (!isVerifiedDepinReply(verifiedReply)) {
-    throw new DepinProtocolError('decodePlainReply requires a verified reply');
-  }
-  if (verifiedReply.kind !== 'plain') {
-    throw new DepinProtocolError('decodePlainReply requires a plain reply');
-  }
-  return parseJsonBytes(hexToBytes(verifiedReply.replyHex), verifiedReply.method);
+async function decodeDepinPoolInfo({ reply, request, trust, serviceId, network, expectedNetworkHash }) {
+  if (!trust || !['pinned', 'key', 'tofu'].includes(trust.mode) || typeof serviceId !== 'string' || !serviceId)
+    throw new DepinProtocolError('Explicit service identity and trust mode required');
+  const pin = trust.mode === 'pinned' ? trust.pin : null;
+  if (pin && pin.serviceId !== serviceId) throw new PoolPinMismatchError('Pinned service mismatch');
+  const expectedGenesis = expectedDepinNetwork(network, expectedNetworkHash ?? (network === undefined ? pin?.network : undefined));
+  if (pin?.network && pin.network !== expectedGenesis) throw new PoolPinMismatchError('Pinned genesis/network mismatch');
+  const poolPublicKey = pin?.poolPublicKey ?? (trust.mode === 'key' ? trust.poolPublicKey : reply.pool_pubkey);
+  const verified = verifyDepinReply({ reply, method: 'depingetmsginfo', request, poolPublicKey, expectedNetworkHash: expectedGenesis });
+  const info = decodePlainReply(verified);
+  if (
+    info.protocol !== 5 ||
+    !info.accepted_protocols?.includes(5) ||
+    info.token !== reply.pool_root ||
+    info.depinpoolpkey !== reply.pool_pubkey ||
+    info.network !== reply.network ||
+    info.instance_id !== reply.instance_id
+  )
+    throw new DepinProtocolError('Bootstrap body/identity mismatch or unsupported protocol');
+  for (const key of ['membership_revision', 'membership_height', 'membership_blockhash'])
+    if (info[key] !== reply[key]) throw new DepinProtocolError('Bootstrap membership mismatch');
+  if (pin && info.token !== pin.poolRoot) throw new PoolPinMismatchError('Pinned pool root mismatch');
+  if (
+    !validateDepinSectionToken(info.token).valid ||
+    !Number.isInteger(info.maxmessagesize) ||
+    info.maxmessagesize < 1 ||
+    info.maxmessagesize > 10240
+  )
+    throw new DepinProtocolError('Invalid pool token/plaintext limit');
+  if (
+    !Number.isSafeInteger(info.server_time_ms) ||
+    !Number.isInteger(info.maxrecipients) ||
+    info.maxrecipients < 1 ||
+    info.maxrecipients > 50
+  )
+    throw new DepinProtocolError('Invalid pool limits/clock');
+  if (info.depinpoolkeyaddress && !(await pubKeyMatchesAddress(hexToBytes(poolPublicKey), info.depinpoolkeyaddress, network)))
+    throw new PoolPinMismatchError('Pool address/key mismatch');
+  const context = Object.freeze({ ...verified.context, clockOffsetMs: info.server_time_ms - Date.now() });
+  return {
+    info,
+    context,
+    pin: { serviceId, poolRoot: info.token, poolPublicKey, network: expectedGenesis },
+    trust: trust.mode,
+    fingerprint: poolKeyFingerprint(poolPublicKey),
+  };
 }
-
-/**
- * Opens a verified BOUND reply: ECIES-decrypts the envelope for the holder
- * and parses the JSON. `opener` is a 32-byte private key / compressed WIF, or
- * an OpenReply callback `(encryptedHex) => bytes|string` for external
- * signers/decryptors.
- */
-async function openBoundReply(verifiedReply, opener) {
-  if (!isVerifiedDepinReply(verifiedReply)) {
-    throw new DepinProtocolError('openBoundReply requires a verified reply');
-  }
-  if (verifiedReply.kind !== 'bound') {
-    throw new DepinProtocolError('openBoundReply requires a bound reply');
-  }
-  if (!opener) {
-    throw new DepinProtocolError('openBoundReply requires a private key or an openReply callback');
-  }
-
-  let plaintext;
-  if (typeof opener === 'function') {
-    let out;
-    try {
-      out = await opener(verifiedReply.replyHex);
-    } catch (e) {
-      throw new DepinReplyDecryptionError(
-        'openReply callback failed for ' + verifiedReply.method, e
-      );
-    }
-    if (typeof out === 'string') plaintext = new TextEncoder().encode(out);
-    else if (out instanceof Uint8Array) plaintext = out;
-    else {
-      throw new DepinReplyDecryptionError(
-        'openReply callback must return bytes or a string'
-      );
-    }
-  } else {
-    const privKey = await normalizePrivateKeyTo32Bytes(opener);
-    let message;
-    try {
-      message = deserializeEciesMessage(hexToBytes(verifiedReply.replyHex));
-    } catch (e) {
-      throw new DepinReplyDecryptionError(
-        'bound reply envelope does not deserialize for ' + verifiedReply.method, e
-      );
-    }
-    plaintext = await eciesDecrypt(message, privKey);
-    if (plaintext === null) {
-      throw new DepinReplyDecryptionError(
-        'bound reply for ' + verifiedReply.method +
-        ' is not encrypted for this key or failed authentication'
-      );
-    }
-  }
-
-  return parseJsonBytes(plaintext, verifiedReply.method);
-}
-
-// ---------------------------------------------------------------------------
-// Pool info, pin and TOFU (§6.4)
-// ---------------------------------------------------------------------------
-
-function canonicalPubKeyHex(pubKey) {
-  return parsePublicKey(pubKey).pointId;
-}
-
-/** Human-comparable fingerprint of a pool key: SHA-256 of the compressed
- *  point, first 16 hex chars in 4-char groups ("ab12 cd34 ef56 7890"). */
-function poolKeyFingerprint(pubKey) {
-  const canonical = canonicalPubKeyHex(pubKey);
-  const digest = bytesToHex(nobleSha256(hexToBytes(canonical)));
-  return digest.slice(0, 16).replace(/(.{4})(?=.)/g, '$1 ');
-}
-
-function readUntrustedBodyJson(reply) {
-  const { kind, replyHex } = validateReplyShape(reply);
-  if (kind !== 'plain') {
-    throw new DepinProtocolError('depingetmsginfo reply must be a plain reply');
-  }
-  return { untrustedBody: parseJsonBytes(hexToBytes(replyHex), 'depingetmsginfo (untrusted)') };
-}
-
-async function checkAnnouncedPoolIdentity(info, poolPublicKey, network) {
-  const announcedKey = info.depinpoolpkey;
-  if (typeof announcedKey !== 'string' ||
-      canonicalPubKeyHex(announcedKey) !== canonicalPubKeyHex(poolPublicKey)) {
-    throw new PoolPinMismatchError(
-      'Announced depinpoolpkey does not match the verified pool key'
-    );
-  }
-  if (typeof info.depinpoolkeyaddress === 'string' && info.depinpoolkeyaddress.length > 0) {
-    const { payload } = await decodeP2PKHAddress(info.depinpoolkeyaddress, network ?? null);
-    const keyHash = await hash160(parsePublicKey(announcedKey).bytes);
-    if (bytesToHex(keyHash) !== bytesToHex(payload)) {
-      throw new PoolPinMismatchError(
-        'depinpoolkeyaddress does not correspond to depinpoolpkey'
-      );
-    }
-  }
-}
-
-function validatePoolInfoShape(info) {
-  if (info.protocol !== 2) {
-    throw new DepinProtocolError(
-      'Pool announces protocol ' + JSON.stringify(info.protocol) + '; this library requires protocol 2'
-    );
-  }
-  const tokenCheck = validateDepinSectionToken(info.token);
-  if (!tokenCheck.valid) {
-    throw new DepinProtocolError('Pool root token invalid: ' + tokenCheck.error);
-  }
-  if (!Number.isInteger(info.maxrecipients) || info.maxrecipients < 1) {
-    throw new DepinProtocolError('Pool maxrecipients invalid');
-  }
-}
-
-/**
- * Decodes and authenticates `depingetmsginfo` under an explicit trust mode
- * (plan v2 §2.4):
- *
- *   { mode: 'pinned', pin: { serviceId, poolRoot, poolPublicKey } }
- *   { mode: 'key',    serviceId, poolPublicKey }
- *   { mode: 'tofu',   serviceId }
- *
- * `serviceId` is the caller-supplied identity of the endpoint this reply
- * came from; with a pinned trust it must equal the pin's serviceId.
- * Returns { info, pin, trust, fingerprint } — `pin` is what the application
- * should persist ('tofu' returns it as OBSERVED, not authenticated).
- */
-async function decodeDepinPoolInfo({ reply, trust, serviceId, network }) {
-  if (!trust || typeof trust !== 'object' || typeof trust.mode !== 'string') {
-    throw new DepinProtocolError("trust must be an object with a 'mode'");
-  }
-  if (typeof serviceId !== 'string' || serviceId.length === 0) {
-    throw new DepinProtocolError('serviceId is required (endpoint identity)');
-  }
-
-  if (trust.mode === 'pinned') {
-    const pin = trust.pin;
-    if (!pin || typeof pin.serviceId !== 'string' || typeof pin.poolRoot !== 'string' ||
-        typeof pin.poolPublicKey !== 'string') {
-      throw new DepinProtocolError('pinned trust requires { serviceId, poolRoot, poolPublicKey }');
-    }
-    if (pin.serviceId !== serviceId) {
-      throw new PoolPinMismatchError(
-        'Reply comes from a different service than the pinned one'
-      );
-    }
-    const verified = verifyDepinReply({
-      reply, method: 'depingetmsginfo', token: pin.poolRoot,
-      poolPublicKey: pin.poolPublicKey
-    });
-    const info = decodePlainReply(verified);
-    validatePoolInfoShape(info);
-    if (info.token !== pin.poolRoot) {
-      throw new PoolPinMismatchError('Announced pool root does not match the pinned root');
-    }
-    await checkAnnouncedPoolIdentity(info, pin.poolPublicKey, network);
-    return {
-      info,
-      pin: { serviceId, poolRoot: pin.poolRoot, poolPublicKey: canonicalPubKeyHex(pin.poolPublicKey) },
-      trust: 'pinned',
-      fingerprint: poolKeyFingerprint(pin.poolPublicKey)
-    };
-  }
-
-  if (trust.mode === 'key') {
-    if (typeof trust.poolPublicKey !== 'string') {
-      throw new DepinProtocolError('key trust requires poolPublicKey');
-    }
-    // §6.4: read body.token and NOTHING else as untrusted input, only to
-    // build the preimage; every other field waits for the signature.
-    const { untrustedBody } = readUntrustedBodyJson(reply);
-    const untrustedToken = untrustedBody.token;
-    if (typeof untrustedToken !== 'string') {
-      throw new DepinProtocolError('depingetmsginfo body has no token to bind the preimage');
-    }
-    const verified = verifyDepinReply({
-      reply, method: 'depingetmsginfo', token: untrustedToken,
-      poolPublicKey: trust.poolPublicKey
-    });
-    const info = decodePlainReply(verified);
-    validatePoolInfoShape(info);
-    await checkAnnouncedPoolIdentity(info, trust.poolPublicKey, network);
-    return {
-      info,
-      pin: { serviceId, poolRoot: info.token, poolPublicKey: canonicalPubKeyHex(trust.poolPublicKey) },
-      trust: 'key',
-      fingerprint: poolKeyFingerprint(trust.poolPublicKey)
-    };
-  }
-
-  if (trust.mode === 'tofu') {
-    // §6.4 TOFU: decode as untrusted material, then check self-consistency —
-    // the key recovered from poolsig must equal the announced depinpoolpkey
-    // and hash to depinpoolkeyaddress. This is consistency, NOT
-    // authentication of the first contact.
-    const { untrustedBody } = readUntrustedBodyJson(reply);
-    const announcedKey = untrustedBody.depinpoolpkey;
-    const untrustedToken = untrustedBody.token;
-    if (typeof announcedKey !== 'string' || typeof untrustedToken !== 'string') {
-      throw new DepinProtocolError(
-        'depingetmsginfo body lacks depinpoolpkey/token for TOFU'
-      );
-    }
-    const verified = verifyDepinReply({
-      reply, method: 'depingetmsginfo', token: untrustedToken,
-      poolPublicKey: announcedKey
-    });
-    const info = decodePlainReply(verified);
-    validatePoolInfoShape(info);
-    await checkAnnouncedPoolIdentity(info, announcedKey, network);
-    return {
-      info,
-      pin: { serviceId, poolRoot: info.token, poolPublicKey: canonicalPubKeyHex(announcedKey) },
-      trust: 'tofu',
-      fingerprint: poolKeyFingerprint(announcedKey)
-    };
-  }
-
-  throw new DepinProtocolError("Unknown trust mode: " + trust.mode);
-}
-
 export {
   MAX_REPLY_HEX_CHARS,
   MAX_DECODED_JSON_BYTES,
@@ -437,5 +192,6 @@ export {
   decodePlainReply,
   openBoundReply,
   decodeDepinPoolInfo,
-  poolKeyFingerprint
+  poolKeyFingerprint,
+  expectedDepinNetwork,
 };

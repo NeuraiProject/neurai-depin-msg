@@ -50,11 +50,24 @@ class DepinCapabilityError extends DepinError {
   }
 }
 
+/** Error carried inside a verified (and, for private calls, decrypted) reply. */
+class DepinRpcError extends Error {
+  constructor(error, context) {
+    super(error.message || 'DePIN RPC failed');
+    this.name = 'DepinRpcError';
+    this.code = error.code;
+    this.data = error.data ?? {};
+    this.depinError = this.data.depin_error ?? null;
+    this.context = context;
+  }
+}
+
 export {
+  DepinRpcError,
   DepinError,
   DepinProtocolError,
   DepinReplyAuthenticationError,
   DepinReplyDecryptionError,
   PoolPinMismatchError,
-  DepinCapabilityError
+  DepinCapabilityError,
 };

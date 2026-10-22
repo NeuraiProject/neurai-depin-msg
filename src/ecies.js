@@ -14,6 +14,7 @@ import { sha256, hash160, kdfSha256 } from './hash.js';
 import { concatBytes, hexToBytes, bytesToHex } from './bytes.js';
 import { readCompactSize, readVector, writeCompactSize, serializeVector } from './serialize.js';
 import { parsePublicKey, derivePublicKeyForms } from './keys.js';
+import { decodeDepinAddress, pubKeyMatchesAddress, strictEcdsaCommitment } from './address.js';
 
 // Injectable RNG, for deterministic tests ONLY. Production always uses
 // crypto.getRandomValues; never call _setDepinTestRng outside a test harness.
@@ -63,10 +64,19 @@ async function aes256GcmDecrypt(ciphertext, key, nonce, tag) {
  * Encrypts plaintext for a set of recipient public keys (33 or 65 bytes each,
  * kept in their given serialization: the ECIES map key is hash160 of those
  * exact bytes, matching Core's CKeyID). Duplicate hash160 entries are
- * rejected; dedupe recipients by curve point before calling.
+ * rejected; deduplicate exact destination identities before calling.
  */
 async function eciesEncrypt(plaintext, recipientPubKeys) {
-  const ephemeralPrivKey = randomBytes(32);
+  let ephemeralPrivKey;
+  for (let attempt = 0; attempt < 128; attempt++) {
+    ephemeralPrivKey = randomBytes(32);
+    if (secp256k1.utils.isValidPrivateKey(ephemeralPrivKey)) break;
+    if (attempt === 127) throw new Error('Random source did not produce a valid ephemeral key');
+  }
+  if (!(plaintext instanceof Uint8Array) || plaintext.length === 0 || plaintext.length > 4 * 1024 * 1024)
+    throw new Error('Invalid ECIES plaintext budget');
+  if (!Array.isArray(recipientPubKeys) || recipientPubKeys.length < 1 || recipientPubKeys.length > 50)
+    throw new Error('Invalid ECIES recipient count');
   const ephemeralPubKey = secp256k1.getPublicKey(ephemeralPrivKey, true);
 
   // AES key derived from ephemeral private key (matches KDF_SHA256 in C++)
@@ -79,7 +89,15 @@ async function eciesEncrypt(plaintext, recipientPubKeys) {
   const recipientKeys = new Map();
 
   for (const recipientPubKey of recipientPubKeys) {
-    const { bytes: keyBytes } = parsePublicKey(recipientPubKey);
+    const descriptor =
+      recipientPubKey && typeof recipientPubKey === 'object' && !(recipientPubKey instanceof Uint8Array) ? recipientPubKey : null;
+    const { bytes: keyBytes } = parsePublicKey(descriptor ? descriptor.publicKey : recipientPubKey);
+    let recipientId = bytesToHex(await hash160(keyBytes));
+    if (descriptor) {
+      if (!(await pubKeyMatchesAddress(keyBytes, descriptor.address, descriptor.network)))
+        throw new Error('Recipient public key does not match address');
+      recipientId = (await decodeDepinAddress(descriptor.address, descriptor.network)).recipientId;
+    }
 
     // ECDH secret must match libsecp256k1's default: SHA256(compressed(shared_point))
     const sharedPointCompressed = secp256k1.getSharedSecret(ephemeralPrivKey, keyBytes, true);
@@ -87,12 +105,11 @@ async function eciesEncrypt(plaintext, recipientPubKeys) {
     const encKey = await kdfSha256(sharedSecret, 32);
 
     const recipientNonce = randomBytes(12);
-    const { ciphertext: encryptedAESKey, tag: recipientTag } =
-      await aes256GcmEncrypt(aesKey, encKey, recipientNonce);
+    const { ciphertext: encryptedAESKey, tag: recipientTag } = await aes256GcmEncrypt(aesKey, encKey, recipientNonce);
     const recipientPackage = concatBytes(recipientNonce, encryptedAESKey, recipientTag);
 
     // Map key is CKeyID: Hash160 of the pubkey bytes as serialized
-    const keyHashHex = bytesToHex(await hash160(keyBytes));
+    const keyHashHex = recipientId;
     if (recipientKeys.has(keyHashHex)) {
       throw new Error('Duplicate recipient key (same hash160): ' + keyHashHex);
     }
@@ -102,87 +119,91 @@ async function eciesEncrypt(plaintext, recipientPubKeys) {
   return { ephemeralPubKey, encryptedPayload: payload, recipientKeys };
 }
 
-/**
- * Compares two 20-byte uint160 keys the way C++ base_uint does: numerically,
- * i.e. from the most significant byte (index 19) down. std::map iterates in
- * this order, so matching it makes our serialization byte-identical to Core's.
- */
+/** Core base_blob compares raw bytes lexicographically, not numeric endian order. */
 function compareUint160(a, b) {
-  for (let i = 19; i >= 0; i--) {
-    if (a[i] !== b[i]) return a[i] - b[i];
-  }
-  return 0;
+  for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a.length - b.length;
+}
+
+function recipientWireId(id, version) {
+  if (/^[0-9a-f]{40}$/.test(id)) return hexToBytes((version === 2 ? '00' : '') + id);
+  if (version === 2 && /^03[0-9a-f]{64}$/.test(id)) return hexToBytes(id);
+  throw new Error('Invalid typed recipient id');
 }
 
 function serializeEciesMessage(msg) {
-  const parts = [];
-  parts.push(serializeVector(msg.ephemeralPubKey));
-  parts.push(serializeVector(msg.encryptedPayload));
-
-  // recipientKeys is a std::map<uint160, vector<unsigned char>>:
-  // CompactSize(count) + repeated (raw 20-byte key + vector value)
-  const entries = Array.from(msg.recipientKeys.entries()).map(([hash160Hex, recipientPackage]) => {
-    const keyBytes = hexToBytes(hash160Hex);
-    if (keyBytes.length !== 20) throw new Error('recipient key hash160 must be 20 bytes');
-    return { keyBytes, recipientPackage };
-  });
-
-  entries.sort((a, b) => compareUint160(a.keyBytes, b.keyBytes));
-
-  parts.push(writeCompactSize(entries.length));
-  for (const { keyBytes, recipientPackage } of entries) {
-    parts.push(keyBytes);
-    parts.push(serializeVector(recipientPackage));
+  const version = [...msg.recipientKeys.keys()].some((id) => id.length === 66) ? 2 : 1;
+  const entries = [...msg.recipientKeys].map(([id, pkg]) => ({ id: recipientWireId(id, version), pkg }));
+  entries.sort((a, b) => compareUint160(a.id, b.id));
+  const parts = version === 2 ? [new Uint8Array([0, 2])] : [];
+  parts.push(serializeVector(msg.ephemeralPubKey), serializeVector(msg.encryptedPayload), writeCompactSize(entries.length));
+  for (const { id, pkg } of entries) {
+    parts.push(id, serializeVector(pkg));
   }
-
-  return concatBytes(...parts);
+  const result = concatBytes(...parts);
+  // Use the same strict parser for locally constructed and received frames.
+  deserializeEciesMessage(result);
+  return result;
 }
 
-/**
- * Parses a serialized CECIESEncryptedMessage. Strict by default: canonical
- * CompactSize, no duplicate recipient key ids, no trailing bytes.
- */
 function deserializeEciesMessage(serialized, options = {}) {
-  const { allowTrailing = false } = options;
-  if (!(serialized instanceof Uint8Array)) {
-    throw new Error('deserializeEciesMessage: invalid input');
+  const maxPlaintext = options.maxPlaintext ?? 4 * 1024 * 1024;
+  const maxRecipients = options.maxRecipients ?? 50;
+  const maxBytes = options.maxBytes ?? 82 + maxPlaintext + 94 * maxRecipients;
+  if (
+    !Number.isInteger(maxPlaintext) ||
+    maxPlaintext < 1 ||
+    maxPlaintext > 4 * 1024 * 1024 ||
+    !Number.isInteger(maxRecipients) ||
+    maxRecipients < 1 ||
+    maxRecipients > 50 ||
+    !Number.isSafeInteger(maxBytes) ||
+    maxBytes < 1 ||
+    maxBytes > 82 + 4 * 1024 * 1024 + 94 * 50
+  )
+    throw new Error('Invalid ECIES parser limits');
+  if (!(serialized instanceof Uint8Array) || serialized.length > maxBytes) throw new Error('Invalid ECIES wire budget');
+  if (options.allowTrailing) throw new Error('Trailing ECIES bytes are not permitted');
+  let offset = 0,
+    version = 1;
+  if (serialized[0] === 0) {
+    if (serialized[1] !== 2) throw new Error('Unsupported ECIES version');
+    version = 2;
+    offset = 2;
   }
-  let offset = 0;
-
-  const ephem = readVector(serialized, offset);
-  const ephemeralPubKey = ephem.data;
+  const ephem = readVector(serialized, offset, 33);
   offset = ephem.offset;
-  if (ephemeralPubKey.length !== 33 && ephemeralPubKey.length !== 65) {
-    throw new Error('Invalid ephemeral pubkey length: ' + ephemeralPubKey.length);
-  }
-
-  const payloadVec = readVector(serialized, offset);
-  const encryptedPayload = payloadVec.data;
-  offset = payloadVec.offset;
-
-  const countRes = readCompactSize(serialized, offset);
-  const count = countRes.value;
-  offset = countRes.offset;
-
+  if (ephem.data.length !== 33) throw new Error('ECIES ephemeral key must be compressed');
+  parsePublicKey(ephem.data);
+  const payload = readVector(serialized, offset, maxPlaintext + 28);
+  offset = payload.offset;
+  if (payload.data.length < 29) throw new Error('ECIES payload is empty or truncated');
+  const count = readCompactSize(serialized, offset);
+  offset = count.offset;
+  if (count.value < 1 || count.value > maxRecipients) throw new Error('Invalid ECIES recipient count');
   const recipientKeys = new Map();
-  for (let i = 0; i < count; i++) {
-    if (offset + 20 > serialized.length) throw new Error('recipientKeys: truncated keyid');
-    const keyId = serialized.slice(offset, offset + 20);
-    offset += 20;
-    const v = readVector(serialized, offset);
-    offset = v.offset;
-    const keyIdHex = bytesToHex(keyId);
-    if (recipientKeys.has(keyIdHex)) {
-      throw new Error('recipientKeys: duplicate key id ' + keyIdHex);
-    }
-    recipientKeys.set(keyIdHex, v.data);
+  let previous = null,
+    hasStrict = false;
+  for (let i = 0; i < count.value; i++) {
+    const start = offset;
+    const type = version === 2 ? serialized[offset++] : 0;
+    if (type !== 0 && type !== 3) throw new Error('Unknown ECIES recipient type');
+    const length = type === 3 ? 32 : 20;
+    if (offset + length > serialized.length) throw new Error('Truncated ECIES recipient id');
+    const payloadId = serialized.slice(offset, offset + length);
+    offset += length;
+    const wireId = serialized.slice(start, offset);
+    if (previous && compareUint160(previous, wireId) >= 0) throw new Error('Duplicate or unsorted ECIES recipient ids');
+    previous = wireId;
+    const pkg = readVector(serialized, offset, 60);
+    offset = pkg.offset;
+    if (pkg.data.length !== 60) throw new Error('ECIES wrapped key must be 60 bytes');
+    hasStrict ||= type === 3;
+    recipientKeys.set((type === 3 ? '03' : '') + bytesToHex(payloadId), pkg.data);
   }
-
-  if (!allowTrailing && offset !== serialized.length) {
-    throw new Error('deserializeEciesMessage: trailing bytes after message');
-  }
-
-  return { ephemeralPubKey, encryptedPayload, recipientKeys };
+  if (version === 2 && !hasStrict) throw new Error('Noncanonical Legacy-only ECIES v2');
+  if (offset !== serialized.length) throw new Error('ECIES trailing bytes');
+  return { version, ephemeralPubKey: ephem.data, encryptedPayload: payload.data, recipientKeys };
 }
 
 /**
@@ -192,13 +213,20 @@ function deserializeEciesMessage(serialized, options = {}) {
  * package. Returns plaintext bytes, or null when no package matches or
  * authentication fails.
  */
-async function eciesDecrypt(msg, privKeyBytes) {
+async function eciesDecrypt(msg, privKeyBytes, address) {
   const forms = derivePublicKeyForms(privKeyBytes);
-  const candidateIds = [
+  let candidateIds = [
     bytesToHex(await hash160(forms.compressed)),
-    bytesToHex(await hash160(forms.uncompressed))
+    bytesToHex(await hash160(forms.uncompressed)),
+    '03' + bytesToHex(strictEcdsaCommitment(forms.compressed)),
   ];
 
+  if (address !== undefined) {
+    const decoded = await decodeDepinAddress(address);
+    const form = (await pubKeyMatchesAddress(forms.compressed, address)) ? forms.compressed : forms.uncompressed;
+    if (!(await pubKeyMatchesAddress(form, address))) throw new Error('Decryption key does not match identity address');
+    candidateIds = [decoded.recipientId];
+  }
   const packages = [];
   for (const id of candidateIds) {
     const pkg = msg.recipientKeys.get(id);
@@ -253,5 +281,5 @@ export {
   serializeEciesMessage,
   deserializeEciesMessage,
   eciesDecrypt,
-  compareUint160
+  compareUint160,
 };

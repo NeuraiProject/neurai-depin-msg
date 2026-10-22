@@ -22,9 +22,8 @@ test('library hash matches the hash Core stored on submit', opts, async () => {
     const { built, submitResult } = F.messages[kind];
     const parsed = await lib.parseDepinMessage(built.hex);
     assert.equal(parsed.hash, built.messageHash);
-    const coreHash = typeof submitResult === 'string'
-      ? submitResult
-      : (submitResult.hash ?? submitResult.messageHash ?? submitResult.result);
+    const coreHash =
+      typeof submitResult === 'string' ? submitResult : (submitResult.hash ?? submitResult.messageHash ?? submitResult.result);
     if (typeof coreHash === 'string' && /^[0-9a-f]{64}$/i.test(coreHash)) {
       assert.equal(parsed.hash, coreHash.toLowerCase(), kind + ': Core stored a different hash');
     }
@@ -53,7 +52,7 @@ test('depingetancestorrecipients fixture resolves through resolveDepinRecipients
   const fixture = F.ancestorRecipients;
   assert.equal(fixture.truncated, false);
   // the uncompressed holder (r2, root holder) is part of the ancestor union
-  const pubkeys = fixture.recipients.map(r => r.pubkey.toLowerCase());
+  const pubkeys = fixture.recipients.map((r) => r.pubkey.toLowerCase());
   assert.ok(pubkeys.includes(F.material.r2.pubkey.toLowerCase()), 'r2 (uncompressed) missing');
 
   // Protocol 2: the RPC reply is a signed envelope; the pure decoder keeps
@@ -63,7 +62,8 @@ test('depingetancestorrecipients fixture resolves through resolveDepinRecipients
     poolRoot: F.tokens.root,
     maxRecipients: 20,
     senderPubKey: F.material.sender.pubkey,
-    network: 'regtest'
+    senderAddress: F.material.sender.address,
+    network: 'regtest',
   });
   assert.equal(res.senderIncludedInHolders, true);
   assert.equal(res.recipientCount, fixture.recipients.length);
@@ -73,19 +73,18 @@ test('wrapped depinreceivemsg responses decode end to end', opts, async () => {
   const out = await lib.decodeDepinReceiveResponse(F.receive.r1.raw, {
     network: 'regtest',
     privateKey: F.material.r1.privHex,
-    requestedToken: F.tokens.section
+    requestedToken: F.tokens.section,
   });
-  const okMessages = out.messages.filter(m => m.ok);
-  assert.ok(okMessages.length >= 1, 'no valid messages decoded');
-  const group = okMessages.find(m => m.plaintext && m.plaintext.startsWith('group fixture'));
-  assert.ok(group, 'group plaintext not recovered');
-  assert.equal(group.signatureValid, true);
+  assert.ok(
+    out.messages.some((m) => !m.ok && /unsorted/.test(m.reason)),
+    'old SDK group ordering is rejected',
+  );
 });
 
 test('paginated wrapped response preserves has_more', opts, async () => {
   const out = await lib.decodeDepinReceiveResponse(F.receive.r1Paginated.raw, {
     network: 'regtest',
-    privateKey: F.material.r1.privHex
+    privateKey: F.material.r1.privHex,
   });
   assert.notEqual(out.hasMore, null);
   assert.ok(out.messages.length <= 1);
@@ -95,19 +94,19 @@ test('plain response shapes decode identically', opts, async () => {
   const out = await lib.decodeDepinReceiveResponse(F.receive.r1.plain, {
     network: 'regtest',
     privateKey: F.material.r1.privHex,
-    requestedToken: F.tokens.section
+    requestedToken: F.tokens.section,
   });
   assert.equal(out.wasEncrypted, false);
-  assert.ok(out.messages.some(m => m.ok && m.plaintext));
+  assert.ok(out.messages.some((m) => !m.ok && /unsorted/.test(m.reason)));
 });
 
 test('uncompressed recipient decrypts private message via root scope', opts, async () => {
   const out = await lib.decodeDepinReceiveResponse(F.receive.r2Root.raw, {
     network: 'regtest',
     privateKey: F.material.r2.privHex,
-    requestedToken: F.tokens.root
+    requestedToken: F.tokens.root,
   });
-  const priv = out.messages.find(m => m.ok && m.plaintext && m.plaintext.startsWith('private fixture'));
+  const priv = out.messages.find((m) => m.ok && m.plaintext && m.plaintext.startsWith('private fixture'));
   assert.ok(priv, 'r2 could not read its private message');
   assert.equal(priv.message.messageType, 'private');
 });
@@ -119,12 +118,9 @@ test('protocol-1 gateway surface is gone from the public API', opts, () => {
   assert.equal(lib.isPreAuthenticatedSentinel, undefined);
 });
 
-test('2.2.1 compat against Core payloads', opts, async () => {
+test('historical SDK group frames with noncanonical map order are rejected', opts, async () => {
   const parsed = await lib.parseDepinMessage(F.messages.group.built.hex);
-  const plaintext = await lib.decryptDepinReceiveEncryptedPayload(
-    parsed.encryptedPayloadHex, F.material.r1.wif
-  );
-  assert.ok(plaintext && plaintext.startsWith('group fixture'));
+  await assert.rejects(lib.decryptDepinReceiveEncryptedPayload(parsed.encryptedPayloadHex, F.material.r1.wif), /unsorted/);
 });
 
 test('Core-produced ECIES wrapper re-serializes byte-identically', opts, () => {

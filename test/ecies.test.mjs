@@ -1,8 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  eciesEncrypt, serializeEciesMessage, deserializeEciesMessage, eciesDecrypt,
-  hexToBytes, bytesToHex, hash160
+  eciesEncrypt,
+  serializeEciesMessage,
+  deserializeEciesMessage,
+  eciesDecrypt,
+  hexToBytes,
+  bytesToHex,
+  hash160,
 } from '../src/index.js';
 import { compareUint160 } from '../src/ecies.js';
 import { keypair, useDeterministicRng } from './helpers.mjs';
@@ -15,7 +20,7 @@ test('ECIES round-trip: compressed, uncompressed, and non-recipient', async () =
   const plaintext = new TextEncoder().encode('round trip');
   const msg = await eciesEncrypt(plaintext, [
     hexToBytes(A.pubCompressed),
-    hexToBytes(B.pubUncompressed) // 65-byte recipient
+    hexToBytes(B.pubUncompressed), // 65-byte recipient
   ]);
   const wire = serializeEciesMessage(msg);
   const parsed = deserializeEciesMessage(wire);
@@ -31,7 +36,9 @@ test('map entries are sorted in uint160 numeric order (Core std::map)', async ()
   const restore = useDeterministicRng();
   try {
     const msg = await eciesEncrypt(new Uint8Array([1]), [
-      hexToBytes(A.pubCompressed), hexToBytes(B.pubCompressed), hexToBytes(C.pubCompressed)
+      hexToBytes(A.pubCompressed),
+      hexToBytes(B.pubCompressed),
+      hexToBytes(C.pubCompressed),
     ]);
     const wire = serializeEciesMessage(msg);
     const parsed = deserializeEciesMessage(wire);
@@ -61,7 +68,7 @@ test('deterministic RNG makes encryption reproducible', async () => {
 test('duplicate recipient hash160 rejected at encryption', async () => {
   await assert.rejects(
     eciesEncrypt(new Uint8Array([1]), [hexToBytes(A.pubCompressed), hexToBytes(A.pubCompressed)]),
-    /Duplicate recipient/
+    /Duplicate recipient/,
   );
 });
 
@@ -71,10 +78,7 @@ test('strict parsing: trailing bytes and duplicate ids rejected', async () => {
 
   const withTrailing = new Uint8Array([...wire, 0]);
   assert.throws(() => deserializeEciesMessage(withTrailing), /trailing/);
-  assert.deepEqual(
-    deserializeEciesMessage(withTrailing, { allowTrailing: true }).encryptedPayload,
-    msg.encryptedPayload
-  );
+  assert.throws(() => deserializeEciesMessage(withTrailing, { allowTrailing: true }), /not permitted/);
 
   // craft duplicate key-id entries
   const dup = await eciesEncrypt(new Uint8Array([1]), [hexToBytes(A.pubCompressed)]);
@@ -88,7 +92,7 @@ test('strict parsing: trailing bytes and duplicate ids rejected', async () => {
   const entry = single.slice(single.length - entryLen);
   const head = single.slice(0, single.length - entryLen - 1); // drop count byte
   const crafted = new Uint8Array([...head, 2, ...entry, ...entry]);
-  assert.throws(() => deserializeEciesMessage(crafted), /duplicate key id/);
+  assert.throws(() => deserializeEciesMessage(crafted), /Duplicate or unsorted/);
   assert.ok(wire1.length > 0);
 });
 
@@ -98,4 +102,16 @@ test('oversized and malformed packages fail closed to null', async () => {
   // truncate A's package below the GCM minimum
   msg.recipientKeys.set(id, msg.recipientKeys.get(id).slice(0, 10));
   assert.equal(await eciesDecrypt(msg, A.priv), null);
+});
+
+test('parser limits can narrow but cannot relax the protocol hard limits', () => {
+  for (const options of [
+    { maxRecipients: 51 },
+    { maxRecipients: NaN },
+    { maxPlaintext: Infinity },
+    { maxPlaintext: 4194305 },
+    { maxBytes: Infinity },
+  ]) {
+    assert.throws(() => deserializeEciesMessage(new Uint8Array(), options), /parser limits/);
+  }
 });

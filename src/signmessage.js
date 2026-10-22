@@ -20,6 +20,7 @@ import { concatBytes, bytesToHex, normalizeHex, hexToBytes } from './bytes.js';
 import { serializeString } from './serialize.js';
 import { base58Decode } from './base58.js';
 import { parsePublicKey } from './keys.js';
+import { decodeStrictEcdsaAddress } from './address.js';
 import { DepinProtocolError } from './errors.js';
 
 const NEURAI_MESSAGE_MAGIC = 'Neurai Signed Message:\n';
@@ -92,9 +93,8 @@ function base64Decode(str) {
 }
 
 // ---------------------------------------------------------------------------
-// WIF with compression flag (plan v2 §2.3): protocol 2 addresses derive from
-// compressed keys, so the compression marker matters and uncompressed WIFs
-// are rejected by the signing APIs.
+// WIF network and compression flag are preserved. Strict ECDSA uses compressed
+// keys; Legacy identities may use either exact SEC1 serialization.
 // ---------------------------------------------------------------------------
 
 /**
@@ -132,27 +132,17 @@ function decodeWIF(wif) {
   return { privateKey: payload.slice(1, 33), compressed, network };
 }
 
-/**
- * Normalizes a signing key for the protocol-2 APIs. Accepts a compressed WIF
- * or 64-char hex (hex is treated as controlling a compressed key, the only
- * form protocol 2 addresses derive from). Rejects uncompressed WIFs.
- * Returns { privateKey, network } (network null for raw hex).
- */
+/** Normalize WIF or raw hex without discarding network/compression metadata. */
 function normalizeSigningKey(privateKeyOrWif) {
   if (typeof privateKeyOrWif !== 'string' || privateKeyOrWif.length === 0) {
     throw new DepinProtocolError('Private key is required (compressed WIF or 64-hex)');
   }
   const asHex = normalizeHex(privateKeyOrWif);
   if (asHex && asHex.length === 64) {
-    return { privateKey: hexToBytes(asHex), network: null };
+    return { privateKey: hexToBytes(asHex), network: null, compressed: true };
   }
   const decoded = decodeWIF(privateKeyOrWif);
-  if (!decoded.compressed) {
-    throw new DepinProtocolError(
-      'Uncompressed WIF rejected: protocol 2 addresses derive from compressed keys'
-    );
-  }
-  return { privateKey: decoded.privateKey, network: decoded.network };
+  return { privateKey: decoded.privateKey, network: decoded.network, compressed: decoded.compressed };
 }
 
 // ---------------------------------------------------------------------------
@@ -163,28 +153,35 @@ function normalizeSigningKey(privateKeyOrWif) {
  * SHA256d over the Bitcoin-style signed-message envelope:
  * ser_string("Neurai Signed Message:\n") ‖ ser_string(message).
  */
-function neuraiSignedMessageHash(message) {
+function neuraiSignedMessageHash(message, address) {
   if (typeof message !== 'string') {
     throw new DepinProtocolError('Message to hash must be a string');
   }
   const data = concatBytes(serializeString(NEURAI_MESSAGE_MAGIC), serializeString(message));
-  return nobleSha256(nobleSha256(data));
+  const original = nobleSha256(nobleSha256(data));
+  if (address && /^(nq|tnq)1/.test(address)) {
+    const { payload } = decodeStrictEcdsaAddress(address);
+    return nobleSha256(
+      nobleSha256(concatBytes(serializeString('Neurai Strict AuthScript Message'), new Uint8Array([3]), payload, original)),
+    );
+  }
+  return original;
 }
 
 /**
  * Signs `message` with a compressed-key identity, `signmessage`-compatible.
  * Deterministic (RFC 6979, low-s). Returns the Base64 compact signature.
  */
-function signRecoverableMessage(message, privateKeyOrCompressedWif) {
-  const { privateKey } = normalizeSigningKey(privateKeyOrCompressedWif);
-  const hash = neuraiSignedMessageHash(message);
+function signRecoverableMessage(message, privateKeyOrCompressedWif, options = {}) {
+  const { privateKey, compressed } = normalizeSigningKey(privateKeyOrCompressedWif);
+  const hash = neuraiSignedMessageHash(message, options.address);
 
   const signature = secp256k1.sign(hash, privateKey); // lowS by default
   if (typeof signature.recovery !== 'number') {
     throw new DepinProtocolError('Signature recovery id unavailable');
   }
   const compact = signature.toCompactRawBytes();
-  const header = 27 + signature.recovery + 4; // +4: compressed key
+  const header = 27 + signature.recovery + ((options.compressed ?? compressed) ? 4 : 0); // +4: compressed key
   const out = new Uint8Array(65);
   out[0] = header;
   out.set(compact, 1);
@@ -194,9 +191,7 @@ function signRecoverableMessage(message, privateKeyOrCompressedWif) {
 function decodeRecoverableSignature(signatureBase64) {
   const bytes = base64Decode(signatureBase64);
   if (bytes.length !== 65) {
-    throw new DepinProtocolError(
-      'Recoverable signature must be 65 bytes; got ' + bytes.length
-    );
+    throw new DepinProtocolError('Recoverable signature must be 65 bytes; got ' + bytes.length);
   }
   const header = bytes[0];
   if (header < 27 || header > 34) {
@@ -205,7 +200,7 @@ function decodeRecoverableSignature(signatureBase64) {
   return {
     recovery: (header - 27) & 3,
     compressed: header >= 31,
-    compact: bytes.slice(1)
+    compact: bytes.slice(1),
   };
 }
 
@@ -216,19 +211,18 @@ function decodeRecoverableSignature(signatureBase64) {
  * produces compressed). Throws DepinProtocolError for malformed input;
  * throws if recovery is mathematically impossible.
  */
-function recoverPublicKeyFromMessage(message, signatureBase64) {
+function recoverPublicKeyFromMessage(message, signatureBase64, address) {
   const { recovery, compressed, compact } = decodeRecoverableSignature(signatureBase64);
-  const hash = neuraiSignedMessageHash(message);
+  if (address && /^(nq|tnq)1/.test(address) && !compressed)
+    throw new DepinProtocolError('Strict ECDSA signatures require a compressed key');
+  const hash = neuraiSignedMessageHash(message, address);
 
   let point;
   try {
     const sig = secp256k1.Signature.fromCompact(compact).addRecoveryBit(recovery);
     point = sig.recoverPublicKey(hash);
   } catch (e) {
-    throw new DepinProtocolError(
-      'Public key recovery failed: ' + (e && e.message ? e.message : e),
-      e
-    );
+    throw new DepinProtocolError('Public key recovery failed: ' + (e && e.message ? e.message : e), e);
   }
   return bytesToHex(point.toRawBytes(compressed));
 }
@@ -239,11 +233,11 @@ function recoverPublicKeyFromMessage(message, signatureBase64) {
  * curve point). Throws DepinProtocolError for malformed signature/key input;
  * returns false for a well-formed signature that does not match.
  */
-function verifyRecoverableMessage(message, signatureBase64, expectedPublicKey) {
+function verifyRecoverableMessage(message, signatureBase64, expectedPublicKey, address) {
   const expected = parsePublicKey(expectedPublicKey);
   let recoveredHex;
   try {
-    recoveredHex = recoverPublicKeyFromMessage(message, signatureBase64);
+    recoveredHex = recoverPublicKeyFromMessage(message, signatureBase64, address);
   } catch (e) {
     if (e instanceof DepinProtocolError && /recovery failed/i.test(e.message)) {
       // Well-formed encoding whose point cannot be recovered: not a match.
@@ -264,5 +258,5 @@ export {
   neuraiSignedMessageHash,
   signRecoverableMessage,
   recoverPublicKeyFromMessage,
-  verifyRecoverableMessage
+  verifyRecoverableMessage,
 };

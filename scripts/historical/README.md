@@ -1,0 +1,1 @@
+Historical RPC 1 fixture generator, retained for provenance only. It requires the old node and SDK and is not a supported RPC 5 tool. Do not regenerate or replace the historical fixtures when testing RPC 5. Current node integration is described in the package README.

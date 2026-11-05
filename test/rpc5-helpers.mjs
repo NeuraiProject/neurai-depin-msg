@@ -3,7 +3,7 @@ import { stringify } from 'lossless-json';
 export const POOL_KEY = '66'.repeat(32);
 export const pool = await lib.createSoftwareIdentity({ privateKey: POOL_KEY, network: 'test' });
 export const context = Object.freeze({
-  network: '0000008b384aeffecdab182575dc4e86c9f07f90318c65088532660ed9a8a021',
+  network: '000000c710413a4265a996d30c86043aedef6a563900f1bc43fea61d5b2dc77d',
   pool_pubkey: pool.publicKey,
   pool_root: '&POOL',
   instance_id: '22'.repeat(32),

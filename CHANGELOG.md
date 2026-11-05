@@ -1,5 +1,9 @@
 # Changelog
 
+## 4.0.1
+
+- Testnet reset of 2026-11-05: `network: 'test'` now expects the genesis `000000c710413a4265a996d30c86043aedef6a563900f1bc43fea61d5b2dc77d` in every RPC 5 reply, so replies from a pool on the previous testnet are rejected. Pass `expectedNetworkHash` to pin another chain.
+
 ## 4.0.0
 
 - Migrate every messaging operation to RPC 5 with complete request signatures and response binding to the local request hash, chain, pool, instance and membership revision.

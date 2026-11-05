@@ -18,7 +18,7 @@ function isVerifiedDepinReply(value) {
   return !!value && VERIFIED_REPLIES.has(value);
 }
 const MAIN_GENESIS = '00000044d33c0c0ba019be5c0249730424a69cb4c222153322f68c6104484806';
-const TEST_GENESIS = '0000008b384aeffecdab182575dc4e86c9f07f90318c65088532660ed9a8a021';
+const TEST_GENESIS = '000000c710413a4265a996d30c86043aedef6a563900f1bc43fea61d5b2dc77d';
 function expectedDepinNetwork(network, expectedNetworkHash) {
   if (expectedNetworkHash !== undefined) {
     if (!/^[0-9a-f]{64}$/.test(expectedNetworkHash)) throw new DepinProtocolError('Invalid expected genesis');
